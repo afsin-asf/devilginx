@@ -8,9 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/afsin-asf/devilginx/log"
 	"github.com/miekg/dns"
-
-	"github.com/kgretzky/evilginx2/log"
 )
 
 type Nameserver struct {

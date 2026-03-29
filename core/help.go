@@ -3,10 +3,9 @@ package core
 import (
 	"fmt"
 
+	"github.com/afsin-asf/devilginx/log"
 	"github.com/chzyer/readline"
 	"github.com/fatih/color"
-
-	"github.com/kgretzky/evilginx2/log"
 )
 
 type Help struct {

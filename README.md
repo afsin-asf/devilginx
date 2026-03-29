@@ -1,7 +1,7 @@
 <p align="center">
-  <img alt="Evilginx2 Logo" src="https://raw.githubusercontent.com/kgretzky/evilginx2/master/media/img/evilginx2-logo-512.png" height="160" />
+  <img alt="Evilginx2 Logo" src="https://raw.githubusercontent.com/afsin-asf/devilginxmaster/media/img/evilginx2-logo-512.png" height="160" />
   <p align="center">
-    <img alt="Evilginx2 Title" src="https://raw.githubusercontent.com/kgretzky/evilginx2/master/media/img/evilginx2-title-black-512.png" height="60" />
+    <img alt="Evilginx2 Title" src="https://raw.githubusercontent.com/afsin-asf/devilginxmaster/media/img/evilginx2-title-black-512.png" height="60" />
   </p>
 </p>
 
@@ -13,7 +13,7 @@ This tool is a successor to [Evilginx](https://github.com/kgretzky/evilginx), re
 Present version is fully written in GO as a standalone application, which implements its own HTTP and DNS server, making it extremely easy to set up and use.
 
 <p align="center">
-  <img alt="Screenshot" src="https://raw.githubusercontent.com/kgretzky/evilginx2/master/media/img/screen.png" height="320" />
+  <img alt="Screenshot" src="https://raw.githubusercontent.com/afsin-asf/devilginxmaster/media/img/screen.png" height="320" />
 </p>
 
 ## Disclaimer
@@ -50,7 +50,7 @@ Find out more on the [official release blog post](https://breakdev.org/evilginx-
 If you want everything about reverse proxy phishing with **Evilginx** - check out my [Evilginx Mastery](https://academy.breakdev.org/evilginx-mastery) course!
 
 <p align="center">
-  <a href="https://academy.breakdev.org/evilginx-mastery"><img alt="Evilginx Mastery" src="https://raw.githubusercontent.com/kgretzky/evilginx2/master/media/img/evilginx_mastery.jpg" height="320" /></a>
+  <a href="https://academy.breakdev.org/evilginx-mastery"><img alt="Evilginx Mastery" src="https://raw.githubusercontent.com/afsin-asf/devilginxmaster/media/img/evilginx_mastery.jpg" height="320" /></a>
 </p>
 
 Learn everything about the latest methods of phishing, using reverse proxying to bypass Multi-Factor Authentication. Learn to think like an attacker, during your red team engagements, and become the master of phishing with Evilginx.

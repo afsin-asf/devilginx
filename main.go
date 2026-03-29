@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"regexp"
 
+	core "github.com/afsin-asf/devilginx/core"
+	database "github.com/afsin-asf/devilginx/database"
+	log "github.com/afsin-asf/devilginx/log"
 	"github.com/caddyserver/certmagic"
-	"github.com/kgretzky/evilginx2/core"
-	"github.com/kgretzky/evilginx2/database"
-	"github.com/kgretzky/evilginx2/log"
 	"go.uber.org/zap"
 
 	"github.com/fatih/color"

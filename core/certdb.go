@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/afsin-asf/devilginx/log"
 	"github.com/caddyserver/certmagic"
-	"github.com/kgretzky/evilginx2/log"
 	utls "github.com/refraction-networking/utls"
 )
 

@@ -1,4 +1,4 @@
-module github.com/kgretzky/evilginx2
+module github.com/afsin-asf/devilginx
 
 go 1.25.0
 

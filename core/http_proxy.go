@@ -44,8 +44,8 @@ import (
 	"github.com/tdewolff/minify/v2"
 	"github.com/tdewolff/minify/v2/js"
 
-	"github.com/kgretzky/evilginx2/database"
-	"github.com/kgretzky/evilginx2/log"
+	"github.com/afsin-asf/devilginx/database"
+	"github.com/afsin-asf/devilginx/log"
 )
 
 const (
