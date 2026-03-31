@@ -319,7 +319,7 @@ func (o *CertDb) getSelfSignedCertificate(host string, phish_host string, port i
 				SerialNumber:          serialNumber,
 				Issuer:                x509ca.Subject,
 				Subject:               srvCert.Subject,
-				NotBefore:             srvCert.NotBefore,
+				NotBefore:             time.Now(),
 				NotAfter:              time.Now().Add(time.Hour * 24 * 180),
 				KeyUsage:              srvCert.KeyUsage,
 				ExtKeyUsage:           srvCert.ExtKeyUsage,

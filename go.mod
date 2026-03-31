@@ -3,7 +3,7 @@ module github.com/afsin-asf/devilginx
 go 1.25.0
 
 require (
-	github.com/afsin-asf/goproxy-utls v1.0.1
+	github.com/afsin-asf/goproxy-utls v1.0.4
 	github.com/caddyserver/certmagic v0.20.0
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e
 	github.com/fatih/color v1.13.0
@@ -22,7 +22,7 @@ require (
 )
 
 require (
-	github.com/andybalholm/brotli v1.2.0 // indirect
+	github.com/andybalholm/brotli v1.2.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect

