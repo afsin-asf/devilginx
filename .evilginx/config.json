@@ -6,7 +6,7 @@
     "autocert": true,
     "bind_ipv4": "",
     "dns_port": 53,
-    "domain": "test.local",
+    "domain": "aryasigorta.com",
     "external_ipv4": "127.0.0.1",
     "https_port": 443,
     "ipv4": "",
@@ -52,7 +52,7 @@
       "visible": true
     },
     "g2a": {
-      "hostname": "test.local",
+      "hostname": "aryasigorta.com",
       "unauth_url": "",
       "enabled": true,
       "visible": true

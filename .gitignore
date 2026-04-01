@@ -4,3 +4,4 @@ private/
 /phishlets
 !/phishlets/example.yaml
 vendor/
+.evilginx/
