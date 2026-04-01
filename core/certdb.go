@@ -164,6 +164,46 @@ func (o *CertDb) generateCertificates() error {
 	return nil
 }
 
+func (o *CertDb) hasCertificates() bool {
+	sitesDir := filepath.Join(o.cache_dir, "sites")
+
+	files, err := os.ReadDir(sitesDir)
+	if err != nil {
+		return false
+	}
+
+	for _, f := range files {
+		if f.IsDir() {
+			certDir := filepath.Join(sitesDir, f.Name())
+
+			certFiles, err := os.ReadDir(certDir)
+			if err != nil {
+				continue
+			}
+
+			var hasCert, hasKey bool
+
+			for _, cf := range certFiles {
+				if !cf.IsDir() {
+					ext := strings.ToLower(filepath.Ext(cf.Name()))
+					if ext == ".pem" || ext == ".crt" {
+						hasCert = true
+					}
+					if ext == ".key" || (ext == ".pem" && cf.Name() == "privkey.pem") {
+						hasKey = true
+					}
+				}
+			}
+
+			if hasCert && hasKey {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 func (o *CertDb) setManagedSync(hosts []string, t time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), t)
 	err := o.magic.ManageSync(ctx, hosts)

@@ -1146,29 +1146,19 @@ func (t *Terminal) checkStatus() {
 
 func (t *Terminal) manageCertificates(verbose bool) {
 	if !t.p.developer {
-		if t.cfg.IsAutocertEnabled() {
-			hosts := t.p.cfg.GetActiveHostnames("")
-			//wc_host := t.p.cfg.GetWildcardHostname()
-			//hosts := []string{wc_host}
-			//hosts = append(hosts, t.p.cfg.GetActiveHostnames("")...)
-			if verbose {
-				log.Info("obtaining and setting up %d TLS certificates - please wait up to 60 seconds...", len(hosts))
-			}
-			err := t.p.crt_db.setManagedSync(hosts, 60*time.Second)
-			if err != nil {
-				log.Error("failed to set up TLS certificates: %s", err)
-				log.Error("run 'test-certs' command to retry")
-				return
-			}
-			if verbose {
-				log.Info("successfully set up all TLS certificates")
-			}
-		} else {
+		// Check if certificates already exist
+		if t.p.crt_db.hasCertificates() {
+			// Use existing certificates from disk
 			err := t.p.crt_db.setUnmanagedSync(verbose)
 			if err != nil {
 				log.Error("failed to set up TLS certificates: %s", err)
 				log.Error("run 'test-certs' command to retry")
 				return
+			}
+		} else {
+			// No certificates found
+			if verbose {
+				log.Warning("no TLS certificates found in sites directory")
 			}
 		}
 	}
