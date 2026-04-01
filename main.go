@@ -170,6 +170,12 @@ func main() {
 	cfg.LoadSubPhishlets()
 	cfg.CleanUp()
 
+	// Start watching for phishlet file changes
+	err = cfg.InitPhishletWatcher(phishlets_path)
+	if err != nil {
+		log.Error("failed to initialize phishlet watcher: %v", err)
+	}
+
 	ns, _ := core.NewNameserver(cfg)
 	ns.Start()
 

@@ -7,6 +7,7 @@ require (
 	github.com/caddyserver/certmagic v0.20.0
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e
 	github.com/fatih/color v1.13.0
+	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-resty/resty/v2 v2.12.0
 	github.com/gorilla/mux v1.7.3
 	github.com/gorilla/websocket v1.5.3
@@ -23,7 +24,6 @@ require (
 
 require (
 	github.com/andybalholm/brotli v1.2.1 // indirect
-	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
