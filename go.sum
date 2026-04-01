@@ -38,8 +38,8 @@ cloud.google.com/go/storage v1.14.0/go.mod h1:GrKmX003DSIwi9o29oFT7YDnHYwZoctc3f
 dmitri.shuralyov.com/gpu/mtl v0.0.0-20190408044501-666a987793e9/go.mod h1:H6x//7gZCb22OMCxBHrMx7a5I7Hp++hsVxbQ4BYO7hU=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/BurntSushi/xgb v0.0.0-20160522181843-27f122750802/go.mod h1:IVnqGOEym/WlBOVXweHU+Q+/VP0lqqI8lqeDx9IjBqo=
-github.com/afsin-asf/goproxy-utls v1.0.4 h1:tmFgxLv8QlFitv6EYq1U/0pkhipRf8VaP0g5hOEXFNE=
-github.com/afsin-asf/goproxy-utls v1.0.4/go.mod h1:Q5YA4MMgEGEUvjylirI+VlvQQHcOzJAwnkUZKJEscM0=
+github.com/afsin-asf/goproxy-utls v1.0.5 h1:XVolh7/t0/BdM8WfHOyy4rYDNhpJO6dcbDFBpWHLaow=
+github.com/afsin-asf/goproxy-utls v1.0.5/go.mod h1:Q5YA4MMgEGEUvjylirI+VlvQQHcOzJAwnkUZKJEscM0=
 github.com/andybalholm/brotli v1.2.1 h1:R+f5xP285VArJDRgowrfb9DqL18yVK0gKAW/F+eTWro=
 github.com/andybalholm/brotli v1.2.1/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/caddyserver/certmagic v0.20.0 h1:bTw7LcEZAh9ucYCRXyCpIrSAGplplI0vGYJ4BpCQ/Fc=

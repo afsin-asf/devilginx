@@ -3,7 +3,7 @@ module github.com/afsin-asf/devilginx
 go 1.25.0
 
 require (
-	github.com/afsin-asf/goproxy-utls v1.0.4
+	github.com/afsin-asf/goproxy-utls v1.0.5
 	github.com/caddyserver/certmagic v0.20.0
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e
 	github.com/fatih/color v1.13.0
