@@ -6,3 +6,6 @@ private/
 vendor/
 .evilginx/
 .evilginx/config.json
+*.md
+*.exe
+*.txt
