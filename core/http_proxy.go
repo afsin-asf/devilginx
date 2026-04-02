@@ -148,11 +148,22 @@ func (c *http2CompatibleUTLSConn) Close() error {
 
 // createCustomUTLSTransport creates an HTTP/2 transport that uses uTLS with the captured ClientHelloSpec
 // This ensures upstream connections use the client's TLS fingerprint instead of default Chrome
-func createCustomUTLSTransport(spec *utls.ClientHelloSpec) http.RoundTripper {
+// proxyDialer is the dial function to use (from p.Proxy.Tr.Dial if proxy is configured, or nil for direct dial)
+func createCustomUTLSTransport(spec *utls.ClientHelloSpec, proxyDialer func(string, string) (net.Conn, error)) http.RoundTripper {
 	dialTLSContext := func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-		// Dial raw TCP connection
-		d := &net.Dialer{}
-		rawConn, err := d.DialContext(ctx, network, addr)
+		var rawConn net.Conn
+		var err error
+
+		// Use proxy dialer if configured, otherwise direct dial
+		if proxyDialer != nil {
+			log.Debug("uTLS: Using configured proxy dialer for %s:%s", network, addr)
+			rawConn, err = proxyDialer(network, addr)
+		} else {
+			// Direct dial (no proxy configured)
+			d := &net.Dialer{}
+			rawConn, err = d.DialContext(ctx, network, addr)
+		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -178,7 +189,17 @@ func createCustomUTLSTransport(spec *utls.ClientHelloSpec) http.RoundTripper {
 			// If ApplyPreset fails, fall back to Chrome_Auto
 			log.Warning("ApplyPreset failed: %v, using Chrome_Auto", err)
 			rawConn.Close()
-			rawConn2, err2 := d.DialContext(ctx, network, addr)
+
+			// Reconnect using same dialer
+			var rawConn2 net.Conn
+			var err2 error
+			if proxyDialer != nil {
+				rawConn2, err2 = proxyDialer(network, addr)
+			} else {
+				d := &net.Dialer{}
+				rawConn2, err2 = d.DialContext(ctx, network, addr)
+			}
+
 			if err2 != nil {
 				return nil, err2
 			}
@@ -452,8 +473,8 @@ func NewHttpProxy(hostname string, port int, cfg *Config, crt_db *CertDb, db *da
 
 				// Override RoundTripper to use ClientHelloSpec for upstream TLS
 				ctx.RoundTripper = goproxy.RoundTripperFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error) {
-					// Create custom TLS transport with ClientHelloSpec
-					tr := createCustomUTLSTransport(ctx.ClientHelloSpec)
+					// Create custom TLS transport with ClientHelloSpec and proxy dialer (if configured)
+					tr := createCustomUTLSTransport(ctx.ClientHelloSpec, p.Proxy.Tr.Dial)
 					return tr.RoundTrip(req)
 				})
 				log.Debug("DoFunc: Custom TLS transport set")

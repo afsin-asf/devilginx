@@ -124,6 +124,12 @@ func (p *HttpProxy) handleWebSocketProxy(w http.ResponseWriter, req *http.Reques
 		WriteBufferSize:  1024,
 	}
 
+	// If proxy is configured, use it for WebSocket connections
+	if p.Proxy.Tr.Dial != nil {
+		dialer.NetDial = p.Proxy.Tr.Dial
+		log.Debug("WebSocket: Using configured proxy for backend connection")
+	}
+
 	log.Debug("WebSocket: Attempting backend connection to %s", backendURL.String())
 	log.Debug("WebSocket: Backend URL scheme=%s, host=%s, path=%s", backendURL.Scheme, backendURL.Host, backendURL.Path)
 
