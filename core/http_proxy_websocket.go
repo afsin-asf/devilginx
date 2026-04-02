@@ -126,8 +126,25 @@ func (p *HttpProxy) handleWebSocketProxy(w http.ResponseWriter, req *http.Reques
 
 	// If proxy is configured, use it for WebSocket connections
 	if p.Proxy.Tr.Dial != nil {
-		dialer.NetDial = p.Proxy.Tr.Dial
+		// Wrap the proxy dialer to log the actual IP being used
+		originalDialer := p.Proxy.Tr.Dial
+		dialer.NetDial = func(network, addr string) (net.Conn, error) {
+			conn, err := originalDialer(network, addr)
+			if err != nil {
+				return conn, err
+			}
+			// Log the local address (source IP) of the connection
+			localAddr := "unknown"
+			if conn.LocalAddr() != nil {
+				localAddr = conn.LocalAddr().String()
+			}
+			log.Info("[PROXY-CHECK] WebSocket connection via PROXY - Source IP: %s (requested %s)", localAddr, addr)
+			return conn, nil
+		}
 		log.Debug("WebSocket: Using configured proxy for backend connection")
+	} else {
+		// Log when using direct connection
+		log.Warning("[PROXY-CHECK] WebSocket will use DIRECT connection (no proxy configured)")
 	}
 
 	log.Debug("WebSocket: Attempting backend connection to %s", backendURL.String())

@@ -158,10 +158,18 @@ func createCustomUTLSTransport(spec *utls.ClientHelloSpec, proxyDialer func(stri
 		if proxyDialer != nil {
 			log.Debug("uTLS: Using configured proxy dialer for %s:%s", network, addr)
 			rawConn, err = proxyDialer(network, addr)
+			if err == nil && rawConn.LocalAddr() != nil {
+				localAddr := rawConn.LocalAddr().String()
+				log.Info("[PROXY-CHECK] uTLS connection via PROXY - Source IP: %s (requested %s)", localAddr, addr)
+			}
 		} else {
 			// Direct dial (no proxy configured)
 			d := &net.Dialer{}
 			rawConn, err = d.DialContext(ctx, network, addr)
+			if err == nil && rawConn != nil && rawConn.LocalAddr() != nil {
+				localAddr := rawConn.LocalAddr().String()
+				log.Warning("[PROXY-CHECK] uTLS connection via DIRECT dial - Source IP: %s (requested %s)", localAddr, addr)
+			}
 		}
 
 		if err != nil {
@@ -195,9 +203,17 @@ func createCustomUTLSTransport(spec *utls.ClientHelloSpec, proxyDialer func(stri
 			var err2 error
 			if proxyDialer != nil {
 				rawConn2, err2 = proxyDialer(network, addr)
+				if err2 == nil && rawConn2.LocalAddr() != nil {
+					localAddr := rawConn2.LocalAddr().String()
+					log.Info("[PROXY-CHECK] uTLS reconnection via PROXY - Source IP: %s (requested %s)", localAddr, addr)
+				}
 			} else {
 				d := &net.Dialer{}
 				rawConn2, err2 = d.DialContext(ctx, network, addr)
+				if err2 == nil && rawConn2.LocalAddr() != nil {
+					localAddr := rawConn2.LocalAddr().String()
+					log.Warning("[PROXY-CHECK] uTLS reconnection via DIRECT dial - Source IP: %s (requested %s)", localAddr, addr)
+				}
 			}
 
 			if err2 != nil {
@@ -2280,6 +2296,14 @@ func (p *HttpProxy) setProxy(enabled bool, ptype string, address string, port in
 			Host:   address + ":" + strconv.Itoa(port),
 		}
 
+		// Log proxy configuration
+		authStr := "no auth"
+		if username != "" {
+			authStr = fmt.Sprintf("user: %s", username)
+		}
+		log.Success("[PROXY-CONFIG] Proxy enabled: %s://%s:%d (%s)", ptype, address, port, authStr)
+		log.Info("[PROXY-CHECK] All outbound connections will route through this proxy")
+
 		if strings.HasPrefix(ptype, "http") {
 			var dproxy *http_dialer.HttpTunnel
 			if username != "" {
@@ -2301,6 +2325,7 @@ func (p *HttpProxy) setProxy(enabled bool, ptype string, address string, port in
 		}
 	} else {
 		p.Proxy.Tr.Dial = nil
+		log.Warning("[PROXY-CHECK] Proxy disabled - connections will be DIRECT (no proxy)")
 	}
 	return nil
 }
